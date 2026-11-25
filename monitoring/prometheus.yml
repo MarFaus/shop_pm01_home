@@ -1,0 +1,60 @@
+# Prometheus каждые 5 секунд опрашивает (scrape) /metrics всех сервисов
+# и хранит временные ряды. Интерфейс: http://localhost:9090 → Status → Targets.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Воркеры приложения: запросы, время ответа, кэш, CPU процесса
+  - job_name: app
+    static_configs:
+      - targets: ["app1:8000", "app2:8000", "app3:8000"]
+
+  # Обработчик очереди заказов
+  - job_name: consumer
+    static_configs:
+      - targets: ["consumer:9100"]
+
+  # Edge-кэш (CDN): соединения и запросы nginx
+  - job_name: edge
+    static_configs:
+      - targets: ["nginx-exporter:9113"]
+
+  # PostgreSQL: по экспортеру на каждый сервер
+  - job_name: postgres
+    static_configs:
+      - targets: ["pg-exporter:9187"]
+        labels: { db: primary }
+      - targets: ["pg-exporter-r1:9187"]
+        labels: { db: replica1 }
+      - targets: ["pg-exporter-r2:9187"]
+        labels: { db: replica2 }
+
+  # Redis Cluster: один экспортер опрашивает все 6 узлов (multi-target).
+  # Prometheus подставляет адрес узла в параметр ?target=...
+  - job_name: redis
+    metrics_path: /scrape
+    static_configs:
+      - targets:
+          - redis://redis1:6379
+          - redis://redis2:6379
+          - redis://redis3:6379
+          - redis://redis4:6379
+          - redis://redis5:6379
+          - redis://redis6:6379
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: redis-exporter:9121
+
+  # RabbitMQ: встроенный плагин rabbitmq_prometheus
+  - job_name: rabbitmq
+    static_configs:
+      - targets: ["rabbitmq:15692"]

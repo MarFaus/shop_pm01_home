@@ -3,3 +3,4 @@ uvicorn
 asyncpg
 redis
 aio-pika
+prometheus-client

@@ -1,10 +1,12 @@
-"""Мини-магазин: FastAPI + PostgreSQL (primary + реплики) + Redis Cluster + RabbitMQ."""
+"""Мини-магазин: FastAPI + PostgreSQL (primary + реплики) + Redis Cluster + RabbitMQ + метрики."""
 import logging
 import os
 import socket
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel, Field
 
 import cache
@@ -33,17 +35,44 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Мини-магазин", lifespan=lifespan)
 
 
+# --- Метрики для Prometheus (лаб 8) ---
+REQUESTS = Counter("http_requests_total", "HTTP-запросы",
+                   ["method", "route", "status"])
+LATENCY = Histogram("http_request_duration_seconds", "Время ответа",
+                    ["method", "route"],
+                    buckets=(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1,
+                             0.25, 0.5, 1.0, 2.5, 5.0))
+
+
 @app.middleware("http")
-async def add_instance_header(request: Request, call_next):
-    # К каждому ответу добавляем имя воркера
-    response = await call_next(request)
-    response.headers["X-Instance"] = INSTANCE
-    return response
+async def instance_and_metrics(request: Request, call_next):
+    start = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        # К каждому ответу добавляем имя воркера
+        response.headers["X-Instance"] = INSTANCE
+        return response
+    finally:
+        # Метка — шаблон маршрута (/products/{product_id}), а не реальный путь:
+        # иначе каждый id товара стал бы отдельным временным рядом
+        route = request.scope.get("route")
+        path = route.path if route is not None else "other"
+        if path != "/metrics":
+            LATENCY.labels(request.method, path).observe(time.perf_counter() - start)
+            REQUESTS.labels(request.method, path, str(status)).inc()
 
 
 class OrderIn(BaseModel):
     product_id: int = Field(gt=0)
     quantity: int = Field(default=1, gt=0, le=100)
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics():
+    """Метрики в формате Prometheus. Снаружи закрыто в nginx/default.conf."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/")

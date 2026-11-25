@@ -9,6 +9,7 @@ import os
 
 import aio_pika
 import asyncpg
+from prometheus_client import Counter, Histogram, start_http_server
 
 import mq
 
@@ -22,20 +23,30 @@ PAYMENT_DELAY = float(os.getenv("PAYMENT_DELAY_SEC", "0.2"))
 PREFETCH = int(os.getenv("CONSUMER_PREFETCH", "50"))
 # Заказы, «застрявшие» в pending дольше этого (сообщение потерялось), отправляем снова
 STUCK_AFTER = os.getenv("STUCK_AFTER", "5 minutes")
+METRICS_PORT = int(os.getenv("METRICS_PORT", "9100"))
+
+# Метрики для Prometheus (лаб 8)
+ORDERS = Counter("orders_processed_total", "Обработанные заказы", ["result"])
+PROCESSING = Histogram("order_processing_seconds", "Время обработки заказа",
+                       buckets=(0.1, 0.2, 0.3, 0.5, 1.0, 2.5, 5.0))
 
 
 async def process(pool: asyncpg.Pool, message: aio_pika.abc.AbstractIncomingMessage) -> None:
     # requeue=False: при исключении сообщение уходит в orders.dead, а не по кругу
     async with message.process(requeue=False):
         order_id = json.loads(message.body)["order_id"]
-        await asyncio.sleep(PAYMENT_DELAY)   # имитация платёжного шлюза
-        # AND status = 'pending' — идемпотентность: повторное сообщение ничего не испортит
-        result = await pool.execute(
-            """UPDATE orders SET status = 'processed', processed_at = now()
-               WHERE id = $1 AND status = 'pending'""",
-            order_id,
-        )
-        if result != "UPDATE 1":
+        with PROCESSING.time():
+            await asyncio.sleep(PAYMENT_DELAY)   # имитация платёжного шлюза
+            # AND status = 'pending' — идемпотентность: повторное сообщение ничего не испортит
+            result = await pool.execute(
+                """UPDATE orders SET status = 'processed', processed_at = now()
+                   WHERE id = $1 AND status = 'pending'""",
+                order_id,
+            )
+        if result == "UPDATE 1":
+            ORDERS.labels("processed").inc()
+        else:
+            ORDERS.labels("skipped").inc()
             log.info("заказ %s уже обработан или не найден", order_id)
 
 
@@ -58,6 +69,7 @@ async def resend_stuck(pool: asyncpg.Pool) -> None:
 
 
 async def main() -> None:
+    start_http_server(METRICS_PORT)   # http://consumer:9100/metrics
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
     await mq.init()   # соединение для повторной отправки
 
@@ -70,6 +82,7 @@ async def main() -> None:
         try:
             await process(pool, message)
         except Exception as exc:  # noqa: BLE001
+            ORDERS.labels("failed").inc()
             log.error("не удалось обработать сообщение: %r", exc)
 
     await queue.consume(on_message)

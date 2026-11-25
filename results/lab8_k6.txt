@@ -1,0 +1,138 @@
+  █ THRESHOLDS 
+
+    http_req_duration
+    ✓ 'p(95)<500' p(95)=11.18ms
+
+      {name:list}
+      ✓ 'p(95)<10000' p(95)=698.7µs
+
+      {name:order}
+      ✓ 'p(95)<10000' p(95)=23.24ms
+
+      {name:product}
+      ✓ 'p(95)<10000' p(95)=5.17ms
+
+      {name:search}
+      ✓ 'p(95)<10000' p(95)=8.7ms
+
+      {name:top}
+      ✓ 'p(95)<10000' p(95)=660.19µs
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 20506   292.58264/s
+    checks_succeeded...: 100.00% 20506 out of 20506
+    checks_failed......: 0.00%   0 out of 20506
+
+    ✓ ответ получен
+
+    HTTP
+    http_req_duration..............: avg=2.14ms   min=172.25µs med=436.05µs max=76.53ms  p(90)=5.59ms   p(95)=11.18ms 
+      { expected_response:true }...: avg=2.14ms   min=172.25µs med=436.05µs max=76.53ms  p(90)=5.59ms   p(95)=11.18ms 
+      { name:list }................: avg=505.47µs min=188.1µs  med=388.08µs max=27.05ms  p(90)=573.09µs p(95)=698.7µs 
+      { name:order }...............: avg=15.73ms  min=9.95ms   med=14.58ms  max=74.01ms  p(90)=20.12ms  p(95)=23.24ms 
+      { name:product }.............: avg=1.56ms   min=188.14µs med=441.43µs max=76.53ms  p(90)=4.45ms   p(95)=5.17ms  
+      { name:search }..............: avg=5.71ms   min=236.51µs med=5.89ms   max=22.42ms  p(90)=7.99ms   p(95)=8.7ms   
+      { name:top }.................: avg=446.25µs min=172.25µs med=388.51µs max=45.21ms  p(90)=565.6µs  p(95)=660.19µs
+    http_req_failed................: 0.00%  0 out of 20506
+    http_reqs......................: 20506  292.58264/s
+
+    EXECUTION
+    iteration_duration.............: avg=102.86ms min=100.29ms med=101.33ms max=180.31ms p(90)=106.4ms  p(95)=111.95ms
+    iterations.....................: 20506  292.58264/s
+    vus............................: 1      min=1          max=49
+    vus_max........................: 50     min=50         max=50
+
+    NETWORK
+    data_received..................: 19 MB  271 kB/s
+    data_sent......................: 1.7 MB 24 kB/s
+
+
+
+
+running (1m10.1s), 00/50 VUs, 20506 complete and 0 interrupted iterations
+default ✓ [ 100% ] 00/50 VUs  1m10s
+
+docker stats во время теста:
+shop-k6-run-f6711a833430 22.24% 25.84MiB / 7.704GiB
+shop-nginx-exporter-1 0.00% 7.828MiB / 32MiB
+shop-edge-1 16.05% 21.63MiB / 128MiB
+shop-lb-1 3.32% 12.43MiB / 64MiB
+shop-grafana-1 0.22% 92.55MiB / 256MiB
+shop-app2-1 12.50% 60.37MiB / 200MiB
+shop-app1-1 9.90% 60.58MiB / 200MiB
+shop-prometheus-1 0.53% 42.64MiB / 256MiB
+shop-pg-exporter-r1-1 0.00% 7.914MiB / 48MiB
+shop-pg-exporter-1 2.07% 7.16MiB / 48MiB
+shop-consumer-1 1.89% 29.64MiB / 128MiB
+shop-pg-exporter-r2-1 1.98% 7.926MiB / 48MiB
+shop-app3-1 11.31% 60.49MiB / 200MiB
+shop-redis-exporter-1 4.69% 8.07MiB / 32MiB
+shop-rabbitmq-1 1.80% 141.2MiB / 384MiB
+shop-postgres-r1-1 4.16% 164.1MiB / 384MiB
+shop-postgres-r2-1 9.20% 164.5MiB / 384MiB
+shop-pgbouncer-1 2.69% 8.492MiB / 64MiB
+shop-postgres-1 7.63% 359.1MiB / 512MiB
+shop-redis4-1 0.68% 6.633MiB / 96MiB
+shop-redis5-1 0.72% 6.184MiB / 96MiB
+shop-redis6-1 0.66% 6.898MiB / 96MiB
+shop-redis1-1 1.50% 6.688MiB / 96MiB
+shop-redis3-1 1.27% 6.617MiB / 96MiB
+shop-redis2-1 1.17% 7.133MiB / 96MiB
+--
+shop-k6-run-f6711a833430 22.19% 29.96MiB / 7.704GiB
+shop-nginx-exporter-1 0.00% 8.594MiB / 32MiB
+shop-edge-1 13.57% 30.75MiB / 128MiB
+shop-lb-1 4.05% 11.81MiB / 64MiB
+shop-grafana-1 0.17% 92.63MiB / 256MiB
+shop-app2-1 11.59% 60.5MiB / 200MiB
+shop-app1-1 11.14% 60.73MiB / 200MiB
+shop-prometheus-1 0.52% 45.41MiB / 256MiB
+shop-pg-exporter-r1-1 1.35% 8MiB / 48MiB
+shop-pg-exporter-1 0.00% 7.801MiB / 48MiB
+shop-consumer-1 2.58% 29.41MiB / 128MiB
+shop-pg-exporter-r2-1 1.26% 7.191MiB / 48MiB
+shop-app3-1 10.64% 60.88MiB / 200MiB
+shop-redis-exporter-1 2.19% 8.707MiB / 32MiB
+shop-rabbitmq-1 2.57% 140.8MiB / 384MiB
+shop-postgres-r1-1 7.96% 164.1MiB / 384MiB
+shop-postgres-r2-1 8.30% 164MiB / 384MiB
+shop-pgbouncer-1 3.25% 8.977MiB / 64MiB
+shop-postgres-1 4.54% 361.6MiB / 512MiB
+shop-redis4-1 0.74% 6.539MiB / 96MiB
+shop-redis5-1 0.62% 6.805MiB / 96MiB
+shop-redis6-1 0.73% 6.754MiB / 96MiB
+shop-redis1-1 1.28% 7.051MiB / 96MiB
+shop-redis3-1 1.11% 7.27MiB / 96MiB
+shop-redis2-1 1.39% 6.68MiB / 96MiB
+--
+shop-k6-run-f6711a833430 31.89% 32.94MiB / 7.704GiB
+shop-nginx-exporter-1 0.28% 7.066MiB / 32MiB
+shop-edge-1 19.17% 38.47MiB / 128MiB
+shop-lb-1 5.06% 11.93MiB / 64MiB
+shop-grafana-1 0.18% 92.69MiB / 256MiB
+shop-app2-1 15.77% 60.82MiB / 200MiB
+shop-app1-1 15.81% 60.79MiB / 200MiB
+shop-prometheus-1 1.25% 48.14MiB / 256MiB
+shop-pg-exporter-r1-1 0.64% 7.293MiB / 48MiB
+shop-pg-exporter-1 0.00% 7.676MiB / 48MiB
+shop-consumer-1 3.15% 29.65MiB / 128MiB
+shop-pg-exporter-r2-1 0.00% 7.852MiB / 48MiB
+shop-app3-1 15.34% 60.94MiB / 200MiB
+shop-redis-exporter-1 1.75% 10.69MiB / 32MiB
+shop-rabbitmq-1 7.37% 139.4MiB / 384MiB
+shop-postgres-r1-1 5.37% 163.8MiB / 384MiB
+shop-postgres-r2-1 10.12% 163.7MiB / 384MiB
+shop-pgbouncer-1 3.75% 8.48MiB / 64MiB
+shop-postgres-1 5.62% 365MiB / 512MiB
+shop-redis4-1 1.07% 7.234MiB / 96MiB
+shop-redis5-1 0.77% 6.961MiB / 96MiB
+shop-redis6-1 0.60% 7.625MiB / 96MiB
+shop-redis1-1 5.11% 6.984MiB / 96MiB
+shop-redis3-1 4.32% 7.02MiB / 96MiB
+shop-redis2-1 4.40% 7.402MiB / 96MiB
+--

@@ -16,6 +16,7 @@ import logging
 import os
 
 import redis.asyncio as redis
+from prometheus_client import Counter
 from redis.asyncio.cluster import ClusterNode, RedisCluster
 
 log = logging.getLogger("cache")
@@ -27,6 +28,9 @@ CACHE_TTL = int(os.getenv("CACHE_TTL", "60"))  # время жизни по ум
 # Потолок на любую операцию с кэшем. Во время failover клиент кластера
 # переподключается и ретраит секундами — пользователь ждать не должен.
 CACHE_OP_TIMEOUT = float(os.getenv("CACHE_OP_TIMEOUT", "0.3"))
+
+# hit — нашли в кэше, miss — нет, error — Redis не ответил
+CACHE_REQUESTS = Counter("cache_requests_total", "Обращения к кэшу", ["result"])
 
 _client: redis.Redis | RedisCluster | None = None
 
@@ -64,8 +68,13 @@ async def get(key: str):
         raw = await asyncio.wait_for(_client.get(key), CACHE_OP_TIMEOUT)
     except Exception as exc:  # noqa: BLE001
         log.warning("redis get %s: %r", key, exc)
+        CACHE_REQUESTS.labels("error").inc()
         return None
-    return None if raw is None else json.loads(raw)
+    if raw is None:
+        CACHE_REQUESTS.labels("miss").inc()
+        return None
+    CACHE_REQUESTS.labels("hit").inc()
+    return json.loads(raw)
 
 
 async def set(key: str, value, ttl: int | None = None) -> None:

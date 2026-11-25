@@ -1,0 +1,9 @@
+# Дашборды загружаются из папки /var/lib/grafana/dashboards (monitoring/grafana/dashboards)
+apiVersion: 1
+providers:
+  - name: shop
+    folder: ""
+    type: file
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

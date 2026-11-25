@@ -49,6 +49,14 @@ x-replica: &replica
     retries: 30
     start_period: 30s
 
+# Общий шаблон экспортера PostgreSQL (по одному на сервер)
+x-pg-exporter: &pg-exporter
+  image: prometheuscommunity/postgres-exporter:v0.17.1
+  depends_on:
+    postgres:
+      condition: service_healthy
+  mem_limit: 48m
+
 # Общий шаблон узла Redis Cluster
 x-redis: &redis
   image: redis:7.4-alpine
@@ -223,15 +231,79 @@ services:
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
-      - "8080:80"
+      - "8081:80"            # напрямую, в обход edge-кэша (для сравнения)
     depends_on: [app1, app2, app3]
     mem_limit: 64m
+
+  # Edge-кэш (модель CDN) — вход в систему для пользователей
+  edge:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./edge/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8080:80"
+    depends_on: [lb]
+    mem_limit: 128m
+
+  # ---------- Мониторинг (лаб 8) ----------
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2d       # храним метрики 2 дня
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "9090:9090"
+    mem_limit: 256m
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Смотреть дашборды можно без входа
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/shop.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus]
+    mem_limit: 256m
+
+  # Экспортеры: переводят статистику сервисов в формат Prometheus
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.4.2
+    command: ["--nginx.scrape-uri=http://edge:8081/stub_status"]
+    depends_on: [edge]
+    mem_limit: 32m
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.74.0
+    mem_limit: 32m
+
+  pg-exporter:
+    <<: *pg-exporter
+    environment:
+      DATA_SOURCE_NAME: postgresql://shop:shop@postgres:5432/shop?sslmode=disable
+  pg-exporter-r1:
+    <<: *pg-exporter
+    environment:
+      DATA_SOURCE_NAME: postgresql://shop:shop@postgres-r1:5432/shop?sslmode=disable
+  pg-exporter-r2:
+    <<: *pg-exporter
+    environment:
+      DATA_SOURCE_NAME: postgresql://shop:shop@postgres-r2:5432/shop?sslmode=disable
 
   k6:
     image: grafana/k6:latest
     profiles: ["test"]
     environment:
-      BASE_URL: http://lb     # изнутри сети Docker — по имени сервиса
+      BASE_URL: http://edge   # тест идёт так же, как пользователи: через edge-кэш
     volumes:
       - ./k6:/scripts:ro
 
@@ -240,3 +312,4 @@ volumes:
   pgdata_r1:
   pgdata_r2:
   rabbitdata:
+  promdata:
