@@ -1,3 +1,6 @@
 .venv/
 __pycache__/
 *.pyc
+
+# служебные файлы Playwright (скриншоты для README)
+.playwright-mcp/
