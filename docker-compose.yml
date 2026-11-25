@@ -8,11 +8,14 @@ x-app: &app
     DATABASE_URL: postgresql://shop:shop@postgres:5432/shop
     # Адреса для первого подключения; остальную карту кластера клиент узнает сам
     REDIS_CLUSTER_NODES: redis1:6379,redis2:6379,redis3:6379,redis4:6379,redis5:6379,redis6:6379
+    RABBITMQ_URL: amqp://shop:shop@rabbitmq:5672/
   depends_on:
     postgres:
       condition: service_healthy   # стартовать, когда база готова
     redis-init:
       condition: service_completed_successfully   # кластер собран
+    rabbitmq:
+      condition: service_healthy
   mem_limit: 200m
   cpus: 0.5                        # имитируем слабый сервер — пол-ядра
   restart: on-failure
@@ -99,6 +102,37 @@ services:
     <<: *app
     environment: { <<: *app-env, INSTANCE_NAME: app3 }
 
+  # Брокер сообщений. Веб-интерфейс: http://localhost:15672 (shop / shop)
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    hostname: rabbitmq         # имя узла RabbitMQ: данные в томе привязаны к нему
+    environment:
+      RABBITMQ_DEFAULT_USER: shop
+      RABBITMQ_DEFAULT_PASS: shop
+      # Планировщики Erlang по умолчанию крутятся в холостом цикле (busy wait)
+      # и съедают CPU даже без нагрузки. В контейнере это только мешает соседям.
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "+sbwt none +sbwtdcpu none +sbwtdio none"
+    volumes:
+      - rabbitdata:/var/lib/rabbitmq                       # очереди переживут перезапуск
+      - ./rabbitmq/limits.conf:/etc/rabbitmq/conf.d/20-limits.conf:ro
+    ports:
+      - "15672:15672"          # веб-интерфейс
+    mem_limit: 384m
+    healthcheck:
+      # ping отвечает раньше, чем открыт порт AMQP — проверяем именно порты
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # Обработчик очереди заказов: тот же образ, другая команда
+  consumer:
+    <<: *app
+    command: ["python", "consumer.py"]
+    environment: { <<: *app-env, INSTANCE_NAME: consumer, PAYMENT_DELAY_SEC: "0.2" }
+    mem_limit: 128m
+
   # Балансировщик нагрузки
   lb:
     image: nginx:1.27-alpine
@@ -119,3 +153,4 @@ services:
 
 volumes:
   pgdata:
+  rabbitdata:

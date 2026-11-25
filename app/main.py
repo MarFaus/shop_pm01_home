@@ -1,5 +1,5 @@
-"""Мини-магазин: FastAPI + PostgreSQL + кэш Redis."""
-import asyncio
+"""Мини-магазин: FastAPI + PostgreSQL + кэш Redis + очередь RabbitMQ."""
+import logging
 import os
 import socket
 from contextlib import asynccontextmanager
@@ -9,13 +9,14 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 import cache
+import mq
+
+log = logging.getLogger("shop")
 
 # --- Настройки из переменных окружения ---
 # По умолчанию — база на этом компьютере (для запуска без Docker)
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://shop:shop@localhost:5432/shop")
 DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
-# Имитация медленного платёжного шлюза
-PAYMENT_DELAY = float(os.getenv("PAYMENT_DELAY_SEC", "0.2"))
 INSTANCE = os.getenv("INSTANCE_NAME") or socket.gethostname()
 
 
@@ -24,8 +25,10 @@ async def lifespan(app: FastAPI):
     # Выполняется при старте приложения: создаём пул соединений
     app.state.db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=DB_POOL_MAX)
     await cache.init()
+    await mq.init()
     yield
     # При остановке — закрываем соединения
+    await mq.close()
     await cache.close()
     await app.state.db.close()
 
@@ -148,9 +151,13 @@ async def top_products(response: Response):
     return result
 
 
-@app.post("/orders", status_code=201)
+@app.post("/orders", status_code=202)
 async def create_order(order: OrderIn):
-    await asyncio.sleep(PAYMENT_DELAY)  # имитация платёжного шлюза
+    """Резервирует товар и ставит заказ в очередь на оплату.
+
+    202 Accepted: заказ принят, но ещё не обработан (status = pending).
+    Оплату (медленный платёжный шлюз) выполняет consumer.py.
+    """
     async with app.state.db.acquire() as conn:
         async with conn.transaction():
             # FOR UPDATE блокирует строку: два покупателя не купят один товар
@@ -167,11 +174,17 @@ async def create_order(order: OrderIn):
                 order.quantity, order.product_id,
             )
             row = await conn.fetchrow(
-                """INSERT INTO orders (product_id, quantity, total, status, processed_at)
-                   VALUES ($1, $2, $3, 'processed', now())
+                """INSERT INTO orders (product_id, quantity, total, status)
+                   VALUES ($1, $2, $3, 'pending')
                    RETURNING id, product_id, quantity, total, status, created_at""",
                 order.product_id, order.quantity, product["price"] * order.quantity,
             )
+    # Публикуем ПОСЛЕ коммита: consumer не должен увидеть заказ, которого ещё нет в БД
+    try:
+        await mq.publish_order(row["id"])
+    except Exception as exc:  # noqa: BLE001
+        # Заказ уже сохранён — не теряем его: consumer переотправит «застрявшие» pending
+        log.warning("заказ %s не поставлен в очередь: %r", row["id"], exc)
     # Инвалидация: остаток товара изменился — старая карточка в кэше неверна
     await cache.delete(f"product:{order.product_id}")
     return dict(row)
