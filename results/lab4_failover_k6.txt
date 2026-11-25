@@ -1,0 +1,67 @@
+Опыт с отказом: через 20 с docker compose stop redis5 (мастер), через 20 с start.
+Состав кластера после возврата:
+172.18.0.8:6379@16379,redis4 slave 
+172.18.0.7:6379@16379,redis6 slave 
+172.18.0.4:6379@16379,redis2 myself,master 5461-10922
+172.18.0.5:6379@16379,redis3 master 10923-16383
+172.18.0.9:6379@16379,redis5 slave 
+172.18.0.3:6379@16379,redis1 master 0-5460
+
+  █ THRESHOLDS 
+
+    http_req_duration
+    ✓ 'p(95)<500' p(95)=206.31ms
+
+      {name:list}
+      ✓ 'p(95)<10000' p(95)=13.94ms
+
+      {name:order}
+      ✓ 'p(95)<10000' p(95)=220.84ms
+
+      {name:product}
+      ✓ 'p(95)<10000' p(95)=5ms
+
+      {name:search}
+      ✓ 'p(95)<10000' p(95)=9.71ms
+
+      {name:top}
+      ✓ 'p(95)<10000' p(95)=3.59ms
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 17073   243.551765/s
+    checks_succeeded...: 100.00% 17073 out of 17073
+    checks_failed......: 0.00%   0 out of 17073
+
+    ✓ ответ получен
+
+    HTTP
+    http_req_duration..............: avg=22.91ms  min=892.34µs med=2.28ms   max=680.48ms p(90)=6.13ms   p(95)=206.31ms
+      { expected_response:true }...: avg=22.91ms  min=892.34µs med=2.28ms   max=680.48ms p(90)=6.13ms   p(95)=206.31ms
+      { name:list }................: avg=14.08ms  min=1.12ms   med=2.14ms   max=622.19ms p(90)=3.88ms   p(95)=13.94ms 
+      { name:order }...............: avg=216.1ms  min=204.17ms med=206.99ms max=511.11ms p(90)=211.06ms p(95)=220.84ms
+      { name:product }.............: avg=13.62ms  min=892.34µs med=2.24ms   max=609.85ms p(90)=3.94ms   p(95)=5ms     
+      { name:search }..............: avg=14.82ms  min=1.24ms   med=4.96ms   max=612.19ms p(90)=7.77ms   p(95)=9.71ms  
+      { name:top }.................: avg=4.6ms    min=985.89µs med=1.84ms   max=680.48ms p(90)=2.93ms   p(95)=3.59ms  
+    http_req_failed................: 0.00%  0 out of 17073
+    http_reqs......................: 17073  243.551765/s
+
+    EXECUTION
+    iteration_duration.............: avg=123.57ms min=101.03ms med=102.95ms max=781.23ms p(90)=107ms    p(95)=307.03ms
+    iterations.....................: 17073  243.551765/s
+    vus............................: 1      min=1          max=49
+    vus_max........................: 50     min=50         max=50
+
+    NETWORK
+    data_received..................: 16 MB  222 kB/s
+    data_sent......................: 1.4 MB 19 kB/s
+
+
+
+
+running (1m10.1s), 00/50 VUs, 17073 complete and 0 interrupted iterations
+default ✓ [ 100% ] 00/50 VUs  1m10s

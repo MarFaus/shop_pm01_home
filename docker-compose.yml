@@ -6,15 +6,28 @@ x-app: &app
   environment: &app-env
     # ВНИМАНИЕ: хост базы — postgres (имя сервиса), а не localhost
     DATABASE_URL: postgresql://shop:shop@postgres:5432/shop
-    REDIS_URL: redis://redis:6379/0
+    # Адреса для первого подключения; остальную карту кластера клиент узнает сам
+    REDIS_CLUSTER_NODES: redis1:6379,redis2:6379,redis3:6379,redis4:6379,redis5:6379,redis6:6379
   depends_on:
     postgres:
       condition: service_healthy   # стартовать, когда база готова
-    redis:
-      condition: service_healthy
+    redis-init:
+      condition: service_completed_successfully   # кластер собран
   mem_limit: 200m
   cpus: 0.5                        # имитируем слабый сервер — пол-ядра
   restart: on-failure
+
+# Общий шаблон узла Redis Cluster
+x-redis: &redis
+  image: redis:7.4-alpine
+  volumes:
+    - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+  mem_limit: 96m
+  healthcheck:
+    test: ["CMD", "redis-cli", "ping"]
+    interval: 5s
+    timeout: 3s
+    retries: 10
 
 services:
   postgres:
@@ -38,20 +51,40 @@ services:
       retries: 30
       start_period: 30s
 
-  # Кэш. Только в памяти (без сохранения на диск): кэш можно потерять.
-  # maxmemory + allkeys-lru: при нехватке памяти вытесняются давно не читанные ключи.
-  redis:
+  # Redis Cluster: 6 узлов (3 мастера + 3 реплики). Наружу порты не открываем.
+  redis1:
+    <<: *redis
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--cluster-announce-hostname", "redis1"]
+  redis2:
+    <<: *redis
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--cluster-announce-hostname", "redis2"]
+  redis3:
+    <<: *redis
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--cluster-announce-hostname", "redis3"]
+  redis4:
+    <<: *redis
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--cluster-announce-hostname", "redis4"]
+  redis5:
+    <<: *redis
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--cluster-announce-hostname", "redis5"]
+  redis6:
+    <<: *redis
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--cluster-announce-hostname", "redis6"]
+
+  # Одноразовый контейнер: собирает кластер и завершается
+  redis-init:
     image: redis:7.4-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no",
-              "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
-    ports:
-      - "6379:6379"          # для запуска приложения на компьютере и redis-cli
-    mem_limit: 128m
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+    volumes:
+      - ./redis/cluster-init.sh:/cluster-init.sh:ro
+    command: ["sh", "/cluster-init.sh"]
+    depends_on:
+      redis1: { condition: service_healthy }
+      redis2: { condition: service_healthy }
+      redis3: { condition: service_healthy }
+      redis4: { condition: service_healthy }
+      redis5: { condition: service_healthy }
+      redis6: { condition: service_healthy }
+    restart: "no"
 
   # Три одинаковых воркера. Порт наружу не открываем — доступ только через lb.
   app1:
