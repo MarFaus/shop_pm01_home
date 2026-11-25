@@ -1,0 +1,60 @@
+Опыт с отказом: через ~22 с docker compose stop app2, через 20 с docker compose start app2
+
+  █ THRESHOLDS 
+
+    http_req_duration
+    ✓ 'p(95)<500' p(95)=204.73ms
+
+      {name:list}
+      ✓ 'p(95)<10000' p(95)=35.16ms
+
+      {name:order}
+      ✓ 'p(95)<10000' p(95)=218.69ms
+
+      {name:product}
+      ✓ 'p(95)<10000' p(95)=8.49ms
+
+      {name:search}
+      ✓ 'p(95)<10000' p(95)=14.59ms
+
+      {name:top}
+      ✓ 'p(95)<10000' p(95)=155.51ms
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 16774   239.568634/s
+    checks_succeeded...: 100.00% 16774 out of 16774
+    checks_failed......: 0.00%   0 out of 16774
+
+    ✓ ответ получен
+
+    HTTP
+    http_req_duration..............: avg=24.99ms  min=1.14ms   med=3.93ms   max=2.2s     p(90)=68.49ms  p(95)=204.73ms
+      { expected_response:true }...: avg=24.99ms  min=1.14ms   med=3.93ms   max=2.2s     p(90)=68.49ms  p(95)=204.73ms
+      { name:list }................: avg=19.58ms  min=10.35ms  med=15.91ms  max=2.01s    p(90)=29.48ms  p(95)=35.16ms 
+      { name:order }...............: avg=211.34ms min=204.33ms med=207.12ms max=2.2s     p(90)=214.53ms p(95)=218.69ms
+      { name:product }.............: avg=3.97ms   min=1.14ms   med=2.35ms   max=2s       p(90)=6.14ms   p(95)=8.49ms  
+      { name:search }..............: avg=6.54ms   min=2.4ms    med=5.02ms   max=91.94ms  p(90)=11.42ms  p(95)=14.59ms 
+      { name:top }.................: avg=80.13ms  min=42.95ms  med=68.35ms  max=334.71ms p(90)=135.08ms p(95)=155.51ms
+    http_req_failed................: 0.00%  0 out of 16774
+    http_reqs......................: 16774  239.568634/s
+
+    EXECUTION
+    iteration_duration.............: avg=125.79ms min=101.47ms med=104.88ms max=2.3s     p(90)=169.33ms p(95)=305.36ms
+    iterations.....................: 16774  239.568634/s
+    vus............................: 1      min=1          max=49
+    vus_max........................: 50     min=50         max=50
+
+    NETWORK
+    data_received..................: 15 MB  213 kB/s
+    data_sent......................: 1.3 MB 19 kB/s
+
+
+
+
+running (1m10.0s), 00/50 VUs, 16774 complete and 0 interrupted iterations
+default ✓ [ 100% ] 00/50 VUs  1m10s

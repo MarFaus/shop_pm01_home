@@ -1,0 +1,81 @@
+  █ THRESHOLDS 
+
+    http_req_duration
+    ✓ 'p(95)<500' p(95)=204.74ms
+
+      {name:list}
+      ✓ 'p(95)<10000' p(95)=34.45ms
+
+      {name:order}
+      ✓ 'p(95)<10000' p(95)=216.79ms
+
+      {name:product}
+      ✓ 'p(95)<10000' p(95)=7.8ms
+
+      {name:search}
+      ✓ 'p(95)<10000' p(95)=13.01ms
+
+      {name:top}
+      ✓ 'p(95)<10000' p(95)=151.98ms
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 16890   240.332815/s
+    checks_succeeded...: 100.00% 16890 out of 16890
+    checks_failed......: 0.00%   0 out of 16890
+
+    ✓ ответ получен
+
+    HTTP
+    http_req_duration..............: avg=24.18ms  min=1.17ms   med=3.64ms   max=427.28ms p(90)=67.32ms  p(95)=204.74ms
+      { expected_response:true }...: avg=24.18ms  min=1.17ms   med=3.64ms   max=427.28ms p(90)=67.32ms  p(95)=204.74ms
+      { name:list }................: avg=18.17ms  min=10.32ms  med=15.31ms  max=165.24ms p(90)=27.66ms  p(95)=34.45ms 
+      { name:order }...............: avg=208.68ms min=203.97ms med=206.65ms max=319.88ms p(90)=212.96ms p(95)=216.79ms
+      { name:product }.............: avg=3.12ms   min=1.17ms   med=2.27ms   max=67.65ms  p(90)=5.37ms   p(95)=7.8ms   
+      { name:search }..............: avg=5.82ms   min=2.36ms   med=4.6ms    max=39.63ms  p(90)=9.93ms   p(95)=13.01ms 
+      { name:top }.................: avg=80.51ms  min=43.03ms  med=67.64ms  max=427.28ms p(90)=133.26ms p(95)=151.98ms
+    http_req_failed................: 0.00%  0 out of 16890
+    http_reqs......................: 16890  240.332815/s
+
+    EXECUTION
+    iteration_duration.............: avg=124.98ms min=101.33ms med=104.57ms max=528.22ms p(90)=168.31ms p(95)=305.23ms
+    iterations.....................: 16890  240.332815/s
+    vus............................: 1      min=1          max=49
+    vus_max........................: 50     min=50         max=50
+
+    NETWORK
+    data_received..................: 15 MB  218 kB/s
+    data_sent......................: 1.3 MB 19 kB/s
+
+
+
+
+running (1m10.3s), 00/50 VUs, 16890 complete and 0 interrupted iterations
+default ✓ [ 100% ] 00/50 VUs  1m10s
+
+docker stats во время теста:
+shop-k6-run-f5c91aec8760 14.15% 26.02MiB / 7.704GiB
+shop-lb-1 5.13% 12.18MiB / 64MiB
+shop-app2-1 10.98% 44.61MiB / 200MiB
+shop-app3-1 12.39% 47.36MiB / 200MiB
+shop-app1-1 9.99% 47.2MiB / 200MiB
+shop-postgres-1 343.80% 265.5MiB / 512MiB
+--
+shop-k6-run-f5c91aec8760 17.71% 29.62MiB / 7.704GiB
+shop-lb-1 6.91% 12.12MiB / 64MiB
+shop-app2-1 13.55% 46.05MiB / 200MiB
+shop-app3-1 16.34% 47.58MiB / 200MiB
+shop-app1-1 16.82% 47.27MiB / 200MiB
+shop-postgres-1 583.57% 254.3MiB / 512MiB
+--
+shop-k6-run-f5c91aec8760 20.83% 31.75MiB / 7.704GiB
+shop-lb-1 8.53% 12.32MiB / 64MiB
+shop-app2-1 21.87% 46.16MiB / 200MiB
+shop-app3-1 20.92% 47.7MiB / 200MiB
+shop-app1-1 21.04% 47.16MiB / 200MiB
+shop-postgres-1 780.98% 267.5MiB / 512MiB
+--
