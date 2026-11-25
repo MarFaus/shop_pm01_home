@@ -61,7 +61,11 @@ button, input { font: inherit; color: inherit; }
   border-bottom: 1px solid var(--line);
   background: var(--surface);
 }
-.brand { font-weight: 700; font-size: 22px; letter-spacing: -0.01em; margin: 0; }
+.top { border-bottom: 3px solid var(--accent); }
+.brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 22px; line-height: 1.15; letter-spacing: -0.01em; color: inherit; text-decoration: none; }
+.mark { width: 40px; height: 40px; flex: none; }
+.mark rect { fill: var(--accent); }
+.mark path { fill: var(--accent-ink); stroke: var(--accent-ink); }
 .brand small { display: block; font-weight: 400; font-size: 13px; color: var(--muted); letter-spacing: 0; }
 .search { display: flex; flex: 1 1 320px; max-width: 560px; }
 .search input {
@@ -100,7 +104,21 @@ button, input { font: inherit; color: inherit; }
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 16px;
   width: 100%; padding: 12px 16px; border: 0; background: none; text-align: left; cursor: pointer;
 }
+.row { transition: background-color .12s; }
 .row:hover { background: var(--bg); }
+.row .meta.low { color: var(--wait); font-weight: 500; }
+/* Хиты недели — это рейтинг, поэтому у строк есть места */
+.rows.ranked { counter-reset: place; }
+.rows.ranked li { counter-increment: place; }
+.rows.ranked .row { position: relative; padding-left: 58px; }
+.rows.ranked .row::before {
+  content: counter(place); position: absolute; left: 16px; top: 10px; width: 28px;
+  font-size: 22px; font-weight: 700; color: var(--accent); text-align: center; font-variant-numeric: tabular-nums;
+}
+.cats button { transition: border-color .12s, background-color .12s; }
+.cats button:hover { background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.buy button:hover:not(:disabled), .search button:hover { filter: brightness(1.12); }
+.card { box-shadow: 0 1px 0 var(--line), 0 12px 32px -24px color-mix(in srgb, var(--accent) 60%, transparent); }
 .row[aria-current="true"] { box-shadow: inset 3px 0 0 var(--accent); background: var(--bg); }
 .row .name { font-weight: 500; }
 .row .art { grid-column: 1; font: 12px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -163,6 +181,7 @@ body.log-collapsed { padding-bottom: 60px; }
 .tag { display: inline-block; min-width: 44px; padding: 0 6px; border-radius: 4px; font-weight: 600; text-align: center; }
 .tag.hit { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
 .tag.miss { background: color-mix(in srgb, var(--wait) 18%, transparent); color: var(--wait); }
+.tag.stale { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
 .tag.none { color: var(--muted); }
 .code-ok { color: var(--ok); }
 .code-bad { color: var(--err); }
@@ -191,7 +210,10 @@ body.log-collapsed { padding-bottom: 60px; }
 </head>
 <body>
 <header class="top">
-  <p class="brand">Мини-магазин<small>200 000 товаров, 50 категорий</small></p>
+  <a class="brand" href="/shop/">
+    <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8"/><path d="M9 12h14l-1.6 11H10.6z"/><path d="M12.5 12v-1.5a3.5 3.5 0 0 1 7 0V12" fill="none" stroke-width="2"/></svg>
+    <span>Мини-магазин<small>200 000 товаров, 50 категорий</small></span>
+  </a>
   <form class="search" id="search" role="search">
     <input id="q" name="q" aria-label="Поиск товаров" type="search" minlength="2" maxlength="50" placeholder="Поиск по названию или артикулу, например 7e77" autocomplete="off">
     <button type="submit">Найти</button>
@@ -239,7 +261,10 @@ body.log-collapsed { padding-bottom: 60px; }
 "use strict";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const rub = new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB" });
+// Цены в базе — числа без валюты; на витрине показываем их в тенге
+// (Intl с currency: "KZT" в браузерах пишет буквы «KZT», поэтому знак ₸ ставим сами)
+const amount = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const money = { format: (v) => `${amount.format(v)} ₸` };
 const PAGE = 20;
 
 // Название из БД: «Товар 166 7e7757b1…» → имя и артикул
@@ -269,7 +294,8 @@ async function api(path, options = {}) {
 
 function tag(value) {
   if (!value) return '<span class="tag none">—</span>';
-  const cls = value === "HIT" ? "hit" : value === "MISS" || value === "EXPIRED" ? "miss" : "none";
+  const cls = value === "HIT" ? "hit" : value === "MISS" || value === "EXPIRED" ? "miss"
+    : value === "STALE" || value === "UPDATING" ? "stale" : "none";
   return `<span class="tag ${cls}">${esc(value)}</span>`;
 }
 
@@ -308,14 +334,16 @@ const state = { mode: "top", category: null, offset: 0, query: "", selected: nul
 function rowHtml(p) {
   const { title, art } = splitName(p.name);
   const meta = p.sold != null ? `продано ${p.sold} шт.` : p.stock != null ? `в наличии ${p.stock}` : "";
-  const price = p.price != null ? rub.format(p.price) : "";
+  const low = p.sold == null && p.stock != null && p.stock < 150;
+  const price = p.price != null ? money.format(p.price) : "";
   return `<li><button class="row" data-id="${p.id}" aria-current="${p.id === state.selected}">
     <span class="name">${esc(title)}</span><span class="price">${price}</span>
-    <span class="art">арт. ${esc(art)}</span><span class="meta">${esc(meta)}</span></button></li>`;
+    <span class="art">арт. ${esc(art)}</span><span class="meta${low ? " low" : ""}">${esc(low ? `осталось ${p.stock}` : meta)}</span></button></li>`;
 }
 
 function render(items, append) {
   const rows = $("rows");
+  rows.classList.toggle("ranked", state.mode === "top");
   if (!append) rows.innerHTML = "";
   if (!items.length && !append) {
     rows.innerHTML = `<li class="empty">${state.mode === "search"
@@ -337,7 +365,7 @@ async function showTop() {
   const ids = [...document.querySelectorAll(".row")].map((b) => b.dataset.id);
   const cards = await Promise.all(ids.map((id) => api(`/products/${id}`).catch(() => null)));
   document.querySelectorAll(".row").forEach((b, i) => {
-    if (cards[i]) b.querySelector(".price").textContent = rub.format(cards[i].price);
+    if (cards[i]) b.querySelector(".price").textContent = money.format(cards[i].price);
   });
 }
 
@@ -417,7 +445,7 @@ async function showProduct(id, keepOrder = false) {
     <h3>${esc(title)}</h3>
     <p class="art">арт. ${esc(art)}</p>
     <p class="desc">${esc(p.description || "")}</p>
-    <p class="price">${rub.format(p.price)}</p>
+    <p class="price">${money.format(p.price)}</p>
     <p class="stock">В наличии: ${p.stock} шт.</p>
     <form class="buy" id="buy">
       <input id="qty" aria-label="Количество" type="number" min="1" max="100" value="1" required>
@@ -436,7 +464,7 @@ function orderHtml(o, error) {
   const paid = o.status === "processed";
   const took = paid ? Math.round(new Date(o.processed_at) - new Date(o.created_at)) : null;
   return `<div class="order">
-    <h4>Заказ №${o.id} · ${rub.format(o.total)}</h4>
+    <h4>Заказ №${o.id} · ${money.format(o.total)}</h4>
     <ol class="steps">
       <li class="done">Принят, товар зарезервирован<small>API ответило 202 и поставило заказ в очередь RabbitMQ</small></li>
       <li class="${paid ? "done" : "now"}">${paid ? "Оплачен" : "Ждёт оплаты"}<small>${paid
