@@ -1,0 +1,294 @@
+{
+ "toc": true,
+ "style": {
+  "font": "Times New Roman",
+  "size": 14,
+  "line": 1.5,
+  "margins_mm": [
+   30,
+   15,
+   20,
+   20
+  ]
+ },
+ "blocks": [
+  {
+   "type": "h1",
+   "text": "Цель работы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Запустить три экземпляра приложения «Мини-магазина» за балансировщиком Nginx (горизонтальное масштабирование) и проверить, что система переживает падение одного воркера под нагрузкой. Код приложения не меняется."
+  },
+  {
+   "type": "h1",
+   "text": "Анализ и постановка",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Масштабировать можно только stateless-приложение: следующий запрос пользователя может попасть на другой воркер. Наше приложение всё хранит в БД, поэтому подходит. Принятые решения — в таблице 1."
+  },
+  {
+   "type": "table",
+   "caption": "Решения по балансировке",
+   "header": [
+    "Задача",
+    "Решение",
+    "Почему"
+   ],
+   "rows": [
+    [
+     "Распределение запросов",
+     "least_conn",
+     "запросы разной длины: 3 мс и 200 мс"
+    ],
+    [
+     "Падение воркера",
+     "max_fails=3 fail_timeout=10s",
+     "исключить упавший на 10 с"
+    ],
+    [
+     "Повтор запроса",
+     "proxy_next_upstream (только GET)",
+     "POST повторять нельзя — двойной заказ"
+    ],
+    [
+     "Накладные расходы",
+     "keepalive 32",
+     "не открывать TCP на каждый запрос"
+    ],
+    [
+     "Три одинаковых сервиса",
+     "YAML-якорь &app",
+     "одна копия настроек"
+    ]
+   ]
+  },
+  {
+   "type": "h1",
+   "text": "Выполнение работы",
+   "numbered": true
+  },
+  {
+   "type": "h2",
+   "text": "Схема стенда"
+  },
+  {
+   "type": "p",
+   "text": "Сервис `app` заменён тремя воркерами `app1`–`app3`; наружу открыт только балансировщик `lb` на порту 8080 (рисунок 1)."
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab2_stand.png",
+   "caption": "Схема стенда лабы 2",
+   "width_cm": 16
+  },
+  {
+   "type": "h2",
+   "text": "Конфигурация Nginx"
+  },
+  {
+   "type": "code",
+   "lang": "nginx",
+   "path": "nginx/default.conf (тег lab-2)",
+   "text": "# Группа серверов-воркеров\nupstream app_backend {\n    least_conn;    # новый запрос — тому, кто меньше занят\n    # После 3 ошибок сервер исключается на 10 секунд\n    server app1:8000 max_fails=3 fail_timeout=10s;\n    server app2:8000 max_fails=3 fail_timeout=10s;\n    server app3:8000 max_fails=3 fail_timeout=10s;\n    # Держим соединения к воркерам открытыми\n    keepalive 32;\n}\n\nserver {\n    listen 80;\n\n    location = /nginx-health {\n        access_log off;\n        return 200 \"ok\\n\";\n    }\n\n    location / {\n        proxy_pass http://app_backend;\n        proxy_http_version 1.1;          # нужно для keepalive\n        proxy_set_header Connection \"\";\n\n        # Передаём воркеру данные о реальном клиенте\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\n        # Воркер упал — повторить запрос на другом\n        # (POST не повторяется: иначе можно создать заказ дважды)\n        proxy_next_upstream error timeout http_502 http_503;\n        proxy_connect_timeout 2s;\n        proxy_read_timeout 30s;\n\n        # Для наглядности: адрес воркера, обработавшего запрос\n        add_header X-Upstream $upstream_addr always;\n    }\n}"
+  },
+  {
+   "type": "p",
+   "text": "Заголовок `X-Upstream` показывает, какой воркер обработал запрос. В итоговой версии (лаб 4) конфигурация дополнена `zone` + `resolve` + `resolver 127.0.0.11`: без них nginx запоминал IP воркеров при старте и после пересоздания контейнера отвечал 502."
+  },
+  {
+   "type": "h2",
+   "text": "Три воркера в docker-compose.yml"
+  },
+  {
+   "type": "p",
+   "text": "Общие настройки воркера вынесены в якорь `&app`, у каждого воркера свой `INSTANCE_NAME`; k6 теперь обращается к `http://lb`:"
+  },
+  {
+   "type": "code",
+   "lang": "yaml",
+   "path": "docker-compose.yml (тег lab-2)",
+   "text": "# Общий шаблон воркера (якорь &app). Блоки x-... Docker игнорирует.\nx-app: &app\n  build: ./app\n  environment: &app-env\n    # ВНИМАНИЕ: хост базы — postgres (имя сервиса), а не localhost\n    DATABASE_URL: postgresql://shop:shop@postgres:5432/shop\n  depends_on:\n    postgres:\n      condition: service_healthy   # стартовать, когда база готова\n  mem_limit: 200m\n  cpus: 0.5                        # имитируем слабый сервер — пол-ядра\n  restart: on-failure\n\nservices:\n  postgres:\n    image: postgres:16-alpine\n    environment:\n      POSTGRES_USER: shop\n      POSTGRES_PASSWORD: shop\n      POSTGRES_DB: shop\n    ports:\n      - \"5432:5432\"          # чтобы приложение на компьютере могло подключиться\n    volumes:\n      - pgdata:/var/lib/postgresql/data              # данные БД переживут перезапуск\n      - ./db/init:/docker-entrypoint-initdb.d:ro     # схема и тестовые данные\n    shm_size: 256m\n    mem_limit: 512m\n    healthcheck:\n      # база готова, когда отвечает по TCP (после загрузки данных)\n      test: [\"CMD-SHELL\", \"pg_isready -h 127.0.0.1 -U shop -d shop\"]\n      interval: 5s\n      timeout: 3s\n      retries: 30\n      start_period: 30s\n\n  # Три одинаковых воркера. Порт наружу не открываем — доступ только через lb.\n  app1:\n    <<: *app\n    environment: { <<: *app-env, INSTANCE_NAME: app1 }\n\n  app2:\n    <<: *app\n    environment: { <<: *app-env, INSTANCE_NAME: app2 }\n\n  app3:\n    <<: *app\n    environment: { <<: *app-env, INSTANCE_NAME: app3 }\n\n  # Балансировщик нагрузки\n  lb:\n    image: nginx:1.27-alpine\n    volumes:\n      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro\n    ports:\n      - \"8080:80\"\n    depends_on: [app1, app2, app3]\n    mem_limit: 64m"
+  },
+  {
+   "type": "h1",
+   "text": "Тестирование",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Функциональные проверки выполнены скриптом `scripts/smoke.sh` на итоговом стенде (после лаб 8; `docker compose up -d --build`), последний прогон — 25.11.2026: пройдено 26 из 26. Нагрузочные замеры k6 сняты в момент сдачи каждой лабы и сохранены в `results/`. Результаты по лабе 2 — в таблице 2."
+  },
+  {
+   "type": "table",
+   "caption": "Тест-кейсы",
+   "header": [
+    "ID",
+    "Сценарий",
+    "Ожидается",
+    "Фактически",
+    "Статус"
+   ],
+   "rows": [
+    [
+     "T2.1",
+     "9 запросов к / — значения поля instance",
+     "app1 app2 app3",
+     "app1 app2 app3",
+     "пройден"
+    ],
+    [
+     "T2.2",
+     "GET /metrics снаружи (через lb)",
+     "404",
+     "404",
+     "пройден"
+    ],
+    [
+     "T2.f",
+     "docker compose stop app2 под нагрузкой, через 20 с start",
+     "сайт отвечает",
+     "0 ошибок из 16 774",
+     "пройден"
+    ],
+    [
+     "T2.k6",
+     "Нагрузочный тест `k6/load.js` (до 50 VU, 70 с)",
+     "ошибок < 1%, p95 < 500 мс",
+     "ошибок 0,00%, p95 204,7 мс, 240,3 RPS",
+     "пройден"
+    ]
+   ]
+  },
+  {
+   "type": "p",
+   "text": "Запросы к главной странице по очереди обрабатывают разные воркеры:"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "6 × GET http://localhost:8080/",
+   "text": "{\"service\":\"mini-shop\",\"instance\":\"app1\"}\n{\"service\":\"mini-shop\",\"instance\":\"app2\"}\n{\"service\":\"mini-shop\",\"instance\":\"app3\"}\n{\"service\":\"mini-shop\",\"instance\":\"app1\"}\n{\"service\":\"mini-shop\",\"instance\":\"app2\"}\n{\"service\":\"mini-shop\",\"instance\":\"app3\"}"
+  },
+  {
+   "type": "p",
+   "text": "Опыт с отказом (`results/lab2_failover_k6.txt`): через ~22 с после старта теста выполнен `docker compose stop app2`, ещё через 20 с — `start`. k6 не зафиксировал ни одной ошибки:"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "k6 во время остановки app2",
+   "text": "метрика                      avg       med     p(95)\nhttp_req_duration        24.99ms    3.93ms  204.73ms\nname:list                19.58ms   15.91ms   35.16ms\nname:order              211.34ms  207.12ms  218.69ms\nname:product              3.97ms    2.35ms    8.49ms\nname:search               6.54ms    5.02ms   14.59ms\nname:top                 80.13ms   68.35ms  155.51ms\nhttp_req_failed       0.00% 0 out of 16774\nhttp_reqs             16774 239.568634/s"
+  },
+  {
+   "type": "p",
+   "text": "Ошибок нет, потому что uvicorn по сигналу остановки дорабатывает начатые запросы, а Nginx повторяет GET на другом воркере и исключает app2 на 10 секунд."
+  },
+  {
+   "type": "p",
+   "text": "Замер без остановок и загрузка контейнеров:"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "docker compose run --rm k6 run /scripts/load.js",
+   "text": "метрика                      avg       med     p(95)\nhttp_req_duration        24.18ms    3.64ms  204.74ms\nname:list                18.17ms   15.31ms   34.45ms\nname:order              208.68ms  206.65ms  216.79ms\nname:product              3.12ms    2.27ms     7.8ms\nname:search               5.82ms     4.6ms   13.01ms\nname:top                 80.51ms   67.64ms  151.98ms\nhttp_req_failed       0.00% 0 out of 16890\nhttp_reqs             16890 240.332815/s"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "docker stats",
+   "text": "shop-lb-1 8.53% 12.32MiB / 64MiB\nshop-app2-1 21.87% 46.16MiB / 200MiB\nshop-app3-1 20.92% 47.7MiB / 200MiB\nshop-app1-1 21.04% 47.16MiB / 200MiB\nshop-postgres-1 780.98% 267.5MiB / 512MiB"
+  },
+  {
+   "type": "h1",
+   "text": "Результаты",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Сравнение с лабой 1 — в таблице 3 и на рисунке 2."
+  },
+  {
+   "type": "table",
+   "caption": "Журнал замеров (k6/load.js)",
+   "header": [
+    "Лаб",
+    "RPS",
+    "p95, мс",
+    "Ошибки, %",
+    "p95 order, мс",
+    "Узкое место"
+   ],
+   "rows": [
+    [
+     "1",
+     "238,6",
+     "168,4",
+     "0,00",
+     "235,2",
+     "postgres (до 800% CPU)"
+    ],
+    [
+     "2",
+     "240,3",
+     "204,7",
+     "0,00",
+     "216,8",
+     "postgres (до 780% CPU)"
+    ]
+   ]
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab2_p95.png",
+   "caption": "p95 всех запросов и заказа по лабам 1–2",
+   "width_cm": 16
+  },
+  {
+   "type": "p",
+   "text": "RPS почти не изменился (238,6 → 240,3): его ограничивает сам тест (~30 VU, пауза 0,1 с после каждого запроса). Нагрузка на воркер упала с 50% до ~21% CPU — появился запас. Узкое место по-прежнему PostgreSQL."
+  },
+  {
+   "type": "h1",
+   "text": "Контрольные вопросы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "**1. Рост RPS.** У нас RPS почти не изменился (238 → 240). Тест сам ограничивает поток: в среднем ~30 VU, и каждый после запроса спит 0,1 с, поэтому больше ~245 RPS он не даст. При этом нагрузка на воркер упала с 50% до ~21% CPU, то есть запас появился. Втрое RPS не растёт и в общем случае: общая база одна, она и есть узкое место, плюс накладные расходы балансировщика. Узкое место — по-прежнему postgres."
+  },
+  {
+   "type": "p",
+   "text": "**2. least_conn.** Запросы у нас очень разные по времени: карточка товара — 3 мс, заказ — 200 мс, топ — 80 мс. Round-robin раздаёт запросы по очереди и может навалить несколько долгих на один воркер. least_conn отдаёт новый запрос тому, у кого меньше активных, и нагрузка выравнивается."
+  },
+  {
+   "type": "p",
+   "text": "**3. Почему POST не повторяется.** POST создаёт заказ. Если воркер упал после записи в базу, но до ответа, повтор на другом воркере создаст второй заказ и второй раз спишет товар. GET безопасно повторять: он ничего не меняет."
+  },
+  {
+   "type": "p",
+   "text": "**4. Корзина в переменной Python.** У каждого воркера своя память, а следующий запрос пользователя может попасть на другой воркер: корзина «пропадёт» или будет разной. При перезапуске воркера она исчезнет совсем. Решение — хранить состояние вне процесса: в БД или в Redis (Лаб 3), а клиенту отдавать только идентификатор сессии."
+  },
+  {
+   "type": "p",
+   "text": "**5. Единая точка отказа.** База PostgreSQL (одна) и сам балансировщик Nginx (один). Упадёт любой из них — магазин недоступен. Реплики БД появятся в Лаб 6."
+  },
+  {
+   "type": "p",
+   "text": "Опыт с отказом: при `docker compose stop app2` под нагрузкой k6 показал 0 ошибок. uvicorn по сигналу остановки дорабатывает начатые запросы, а Nginx (`proxy_next_upstream`) повторяет GET на другом воркере и после ошибок исключает app2 на 10 секунд."
+  },
+  {
+   "type": "h1",
+   "text": "Выводы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Приложение масштабировано до трёх воркеров за Nginx с алгоритмом least_conn. Проверено, что запросы распределяются по всем воркерам, а остановка одного под нагрузкой не даёт ни одной ошибки. Пропускная способность не выросла, так как упирается в нагрузочный тест и в базу данных; единые точки отказа — база и сам балансировщик."
+  }
+ ]
+}

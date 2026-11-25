@@ -1,0 +1,336 @@
+{
+ "toc": true,
+ "style": {
+  "font": "Times New Roman",
+  "size": 14,
+  "line": 1.5,
+  "margins_mm": [
+   30,
+   15,
+   20,
+   20
+  ]
+ },
+ "blocks": [
+  {
+   "type": "h1",
+   "text": "Цель работы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Написать REST API «Мини-магазина» на FastAPI, подключить его к PostgreSQL в Docker, упаковать приложение в контейнер и выполнить первый нагрузочный замер k6. Полученные цифры — базовая линия, с которой сравниваются следующие лабораторные."
+  },
+  {
+   "type": "h1",
+   "text": "Анализ и постановка",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "API покрывает типовые сценарии магазина. В таблице 1 перечислены методы и их доля в нагрузочном тесте `k6/load.js`."
+  },
+  {
+   "type": "table",
+   "caption": "Методы API и профиль нагрузки",
+   "header": [
+    "Метод",
+    "Назначение",
+    "Доля в load.js"
+   ],
+   "rows": [
+    [
+     "GET /products/{id}",
+     "карточка товара",
+     "60%"
+    ],
+    [
+     "GET /products?category_id=",
+     "список категории, по убыванию цены",
+     "20%"
+    ],
+    [
+     "GET /stats/top-products",
+     "топ-10 продаж за неделю",
+     "10%"
+    ],
+    [
+     "GET /products/search?q=",
+     "поиск по названию (ILIKE)",
+     "5%"
+    ],
+    [
+     "POST /orders",
+     "заказ: списание остатка + «платёжный шлюз» 0,2 с",
+     "5%"
+    ],
+    [
+     "GET /orders/{id}",
+     "заказ по номеру («Сделайте сами»)",
+     "—"
+    ]
+   ]
+  },
+  {
+   "type": "p",
+   "text": "В приложение намеренно заложены «тяжёлые» места, которые ускоряются в следующих лабах: запросы без индексов (лаб 7), повторное чтение одних и тех же товаров (лаб 3), синхронное ожидание шлюза в заказе (лаб 5)."
+  },
+  {
+   "type": "h1",
+   "text": "Выполнение работы",
+   "numbered": true
+  },
+  {
+   "type": "h2",
+   "text": "Схема стенда"
+  },
+  {
+   "type": "p",
+   "text": "Стенд лабы 1 состоит из контейнеров `postgres` и `app` и запускаемого вручную `k6` (рисунок 1). Приложению выделено 0,5 ядра и 200 МБ — имитация слабого сервера."
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab1_stand.png",
+   "caption": "Схема стенда лабы 1",
+   "width_cm": 16
+  },
+  {
+   "type": "h2",
+   "text": "База данных"
+  },
+  {
+   "type": "p",
+   "text": "Схема и тестовые данные создаются init-скриптом при первом запуске пустой базы: 50 категорий, 200 000 товаров и 500 000 заказов за 90 дней. Индексов, кроме первичных ключей, нет — они добавляются в лабе 7."
+  },
+  {
+   "type": "code",
+   "lang": "sql",
+   "path": "db/init/01_schema.sql (тег lab-1)",
+   "text": "CREATE TABLE categories (\n    id   SERIAL PRIMARY KEY,\n    name TEXT NOT NULL\n);\n\nCREATE TABLE products (\n    id          BIGSERIAL PRIMARY KEY,\n    category_id INT           NOT NULL REFERENCES categories (id),\n    name        TEXT          NOT NULL,\n    description TEXT,\n    price       NUMERIC(10,2) NOT NULL,\n    stock       INT           NOT NULL DEFAULT 0,\n    created_at  TIMESTAMPTZ   NOT NULL DEFAULT now()\n);\n\nCREATE TABLE orders (\n    id           BIGSERIAL PRIMARY KEY,\n    product_id   BIGINT        NOT NULL REFERENCES products (id),\n    quantity     INT           NOT NULL CHECK (quantity > 0),\n    total        NUMERIC(12,2) NOT NULL,\n    status       TEXT          NOT NULL DEFAULT 'new',   -- new | pending | processed\n    created_at   TIMESTAMPTZ   NOT NULL DEFAULT now(),\n    processed_at TIMESTAMPTZ\n);\n\n-- Индексов (кроме первичных ключей) специально НЕТ — добавим в лабораторной 7.\n\nINSERT INTO categories (name)\nSELECT 'Категория ' || g FROM generate_series(1, 50) AS g;\n\n-- 200 000 товаров; md5() добавляет случайный текст для поиска\nINSERT INTO products (category_id, name, description, price, stock)\nSELECT (g % 50) + 1,\n       'Товар ' || g || ' ' || md5(g::text),\n       'Описание товара номер ' || g,\n       round((random() * 10000 + 10)::numeric, 2),\n       100 + (random() * 1000)::int\nFROM generate_series(1, 200000) AS g;"
+  },
+  {
+   "type": "h2",
+   "text": "Приложение FastAPI"
+  },
+  {
+   "type": "p",
+   "text": "Пул соединений asyncpg создаётся при старте (`lifespan`). Параметры запросов передаются через `$1`, а не f-строками — защита от SQL-инъекций. Создание заказа выполняется в транзакции с блокировкой строки товара `FOR UPDATE`:"
+  },
+  {
+   "type": "code",
+   "lang": "python",
+   "path": "app/main.py (тег lab-1)",
+   "text": "@app.post(\"/orders\", status_code=201)\nasync def create_order(order: OrderIn):\n    await asyncio.sleep(PAYMENT_DELAY)  # имитация платёжного шлюза\n    async with app.state.db.acquire() as conn:\n        async with conn.transaction():\n            # FOR UPDATE блокирует строку: два покупателя не купят один товар\n            product = await conn.fetchrow(\n                \"SELECT price, stock FROM products WHERE id = $1 FOR UPDATE\",\n                order.product_id,\n            )\n            if product is None:\n                raise HTTPException(404, \"Товар не найден\")\n            if product[\"stock\"] < order.quantity:\n                raise HTTPException(409, \"Недостаточно товара на складе\")\n            await conn.execute(\n                \"UPDATE products SET stock = stock - $1 WHERE id = $2\",\n                order.quantity, order.product_id,\n            )\n            row = await conn.fetchrow(\n                \"\"\"INSERT INTO orders (product_id, quantity, total, status, processed_at)\n                   VALUES ($1, $2, $3, 'processed', now())\n                   RETURNING id, product_id, quantity, total, status, created_at\"\"\",\n                order.product_id, order.quantity, product[\"price\"] * order.quantity,\n            )\n    return dict(row)"
+  },
+  {
+   "type": "p",
+   "text": "Метод «Сделайте сами» — заказ по номеру, по образцу `get_product`; для несуществующего заказа возвращается 404:"
+  },
+  {
+   "type": "code",
+   "lang": "python",
+   "path": "app/main.py (тег lab-1)",
+   "text": "# «Сделайте сами»: заказ по номеру (образец — get_product)\n@app.get(\"/orders/{order_id}\")\nasync def get_order(order_id: int):\n    row = await app.state.db.fetchrow(\n        \"\"\"SELECT id, product_id, quantity, total, status, created_at, processed_at\n           FROM orders WHERE id = $1\"\"\",\n        order_id,\n    )\n    if row is None:\n        raise HTTPException(404, \"Заказ не найден\")\n    return dict(row)"
+  },
+  {
+   "type": "h2",
+   "text": "Контейнер приложения и docker-compose.yml"
+  },
+  {
+   "type": "p",
+   "text": "В Dockerfile `requirements.txt` копируется отдельно и раньше кода: слой с `pip install` кэшируется, и правка `main.py` пересобирает только последний слой."
+  },
+  {
+   "type": "code",
+   "lang": "dockerfile",
+   "path": "app/Dockerfile (тег lab-1)",
+   "text": "FROM python:3.14.0\n\n# Не создавать .pyc и сразу выводить логи\nENV PYTHONDONTWRITEBYTECODE=1 \\\n    PYTHONUNBUFFERED=1\n\nWORKDIR /app\n\n# Сначала зависимости: этот слой кэшируется и не пересобирается при правке кода\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\n\nCOPY . .\n\nEXPOSE 8000\n\n# Один процесс на контейнер: масштабируемся количеством контейнеров.\n# --no-access-log: под нагрузкой лог каждого запроса заметно замедляет работу.\nCMD [\"uvicorn\", \"main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\", \"--no-access-log\"]"
+  },
+  {
+   "type": "p",
+   "text": "В `docker-compose.yml` приложение подключается к базе по имени сервиса `postgres`, стартует после healthcheck базы; k6 вынесен в профиль `test`:"
+  },
+  {
+   "type": "code",
+   "lang": "yaml",
+   "path": "docker-compose.yml (тег lab-1)",
+   "text": "  app:\n    build: ./app\n    environment:\n      # ВНИМАНИЕ: хост базы — postgres (имя сервиса), а не localhost\n      DATABASE_URL: postgresql://shop:shop@postgres:5432/shop\n      INSTANCE_NAME: app\n    ports:\n      - \"8080:8000\"          # порт компьютера : порт контейнера\n    depends_on:\n      postgres:\n        condition: service_healthy   # стартовать, когда база готова\n    mem_limit: 200m\n    cpus: 0.5                # имитируем слабый сервер — пол-ядра\n    restart: on-failure\n\n  k6:\n    image: grafana/k6:latest\n    profiles: [\"test\"]\n    environment:\n      BASE_URL: http://app:8000     # изнутри сети Docker — по имени сервиса\n    volumes:\n      - ./k6:/scripts:ro"
+  },
+  {
+   "type": "p",
+   "text": "Документация API доступна в Swagger UI по адресу http://localhost:8080/docs (рисунок 2)."
+  },
+  {
+   "type": "figure",
+   "path": "../img/swagger.png",
+   "caption": "Swagger UI «Мини-магазина» (снимок итогового стенда)",
+   "width_cm": 16
+  },
+  {
+   "type": "h1",
+   "text": "Тестирование",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Функциональные проверки выполнены скриптом `scripts/smoke.sh` на итоговом стенде (после лаб 8; `docker compose up -d --build`), последний прогон — 25.11.2026: пройдено 26 из 26. Нагрузочные замеры k6 сняты в момент сдачи каждой лабы и сохранены в `results/`. Результаты по лабе 1 — в таблице 2."
+  },
+  {
+   "type": "table",
+   "caption": "Тест-кейсы",
+   "header": [
+    "ID",
+    "Сценарий",
+    "Ожидается",
+    "Фактически",
+    "Статус"
+   ],
+   "rows": [
+    [
+     "T1.1",
+     "Количество товаров в БД",
+     "200000",
+     "200000",
+     "пройден"
+    ],
+    [
+     "T1.2",
+     "GET /products/1 — код ответа",
+     "200",
+     "200",
+     "пройден"
+    ],
+    [
+     "T1.3",
+     "GET /orders/999999999 (несуществующий заказ)",
+     "404",
+     "404",
+     "пройден"
+    ],
+    [
+     "T1.4",
+     "Swagger UI /docs открывается",
+     "200",
+     "200",
+     "пройден"
+    ],
+    [
+     "T1.k6",
+     "Нагрузочный тест `k6/load.js` (до 50 VU, 70 с)",
+     "ошибок < 1%, p95 < 500 мс",
+     "ошибок 0,00%, p95 168,4 мс, 238,6 RPS",
+     "пройден"
+    ]
+   ]
+  },
+  {
+   "type": "p",
+   "text": "Ответ карточки товара и ответ на запрос несуществующего заказа:"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "GET http://localhost:8080/products/1",
+   "text": "{\n    \"id\": 1,\n    \"name\": \"Товар 1 c4ca4238a0b923820dcc509a6f75849b\",\n    \"description\": \"Описание товара номер 1\",\n    \"price\": 6974.51,\n    \"stock\": 485,\n    \"category\": \"Категория 2\"\n}"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "GET http://localhost:8080/orders/999999999",
+   "text": "HTTP 404\n{\"detail\":\"Заказ не найден\"}"
+  },
+  {
+   "type": "p",
+   "text": "Ключевые строки отчёта k6 (`results/lab1_k6.txt`):"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "docker compose run --rm k6 run /scripts/load.js",
+   "text": "метрика                      avg       med     p(95)\nhttp_req_duration        25.45ms    5.55ms   168.4ms\nname:list                19.74ms   15.39ms   45.33ms\nname:order               211.9ms  207.58ms  235.16ms\nname:product               5.2ms    2.53ms   17.17ms\nname:search               7.63ms    4.94ms   19.43ms\nname:top                 78.11ms   66.31ms  144.49ms\nhttp_req_failed       0.00% 0 out of 16719\nhttp_reqs             16719 238.618971/s"
+  },
+  {
+   "type": "p",
+   "text": "Пиковая загрузка контейнеров по `docker stats` во время теста:"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "docker stats",
+   "text": "shop-app-1 49.97% 50.01MiB / 200MiB\nshop-postgres-1 800.29% 208.8MiB / 512MiB"
+  },
+  {
+   "type": "h1",
+   "text": "Результаты",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Первая строка журнала замеров приведена в таблице 3."
+  },
+  {
+   "type": "table",
+   "caption": "Журнал замеров (k6/load.js)",
+   "header": [
+    "Лаб",
+    "RPS",
+    "p95, мс",
+    "Ошибки, %",
+    "p95 order, мс",
+    "Узкое место"
+   ],
+   "rows": [
+    [
+     "1",
+     "238,6",
+     "168,4",
+     "0,00",
+     "235,2",
+     "postgres (до 800% CPU)"
+    ]
+   ]
+  },
+  {
+   "type": "p",
+   "text": "Средний ответ — 25 мс, а p95 — 168 мс: «хвост» дают заказ (ожидание шлюза 0,2 с) и топ продаж. Узкое место — PostgreSQL: до 800% CPU (8 ядер) на тяжёлых запросах без индексов, при этом приложение упирается в свой лимит 0,5 ядра."
+  },
+  {
+   "type": "h1",
+   "text": "Контрольные вопросы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "**1. Образ и контейнер, тома.** Образ — неизменяемый шаблон (файлы + команда запуска), контейнер — запущенный экземпляр образа со своим слоем для записи. Том (`pgdata`) хранит данные отдельно от контейнера. После `docker compose down` контейнеры удаляются, а том остаётся, и база при следующем запуске на месте. После `docker compose down -v` удаляется и том: база пересоздаётся с нуля из `db/init`."
+  },
+  {
+   "type": "p",
+   "text": "**2. localhost:5432 и postgres:5432.** Локально uvicorn работает на компьютере, а порт базы проброшен на компьютер (`5432:5432`). Внутри контейнера `localhost` — это сам контейнер приложения. Сервисы compose живут в общей сети и находят друг друга по имени сервиса, поэтому из `app` база доступна как `postgres:5432` (внутренний порт)."
+  },
+  {
+   "type": "p",
+   "text": "**3. Зачем requirements.txt копируется отдельно.** Docker кэширует слои. Пока `requirements.txt` не менялся, слой с `pip install` берётся из кэша, и правка `main.py` пересобирает только последний слой `COPY . .`. Сборка занимает секунды вместо минуты."
+  },
+  {
+   "type": "p",
+   "text": "**4. FOR UPDATE.** Блокирует строку товара до конца транзакции: второй покупатель ждёт, пока первый не спишет остаток. Без блокировки оба прочитают `stock = 1`, оба пройдут проверку и оба спишут товар, и остаток станет `-1` (продали больше, чем было)."
+  },
+  {
+   "type": "p",
+   "text": "**5. p95.** 95% запросов выполнились быстрее этого значения. Среднее прячет «хвост»: при среднем 25 мс часть пользователей ждёт 200+ мс. В Лаб 1 среднее было 25 мс, а p95 — 168 мс. p95 показывает, что ощущают самые невезучие пользователи."
+  },
+  {
+   "type": "p",
+   "text": "**6. Узкое место.** postgres: в `docker stats` у него до 800% CPU (8 ядер), у остальных намного меньше. Его грузят тяжёлые запросы `top-products` (агрегация по 500 000 заказов) и `ILIKE '%...%'` без индексов. Приложение к пику тоже упёрлось в свой лимит 0,5 ядра (50% CPU)."
+  },
+  {
+   "type": "h1",
+   "text": "Выводы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Реализовано REST API магазина на FastAPI + asyncpg, база PostgreSQL с 200 000 товаров и 500 000 заказов, приложение упаковано в контейнер. Все методы проверены, включая 404 для несуществующего заказа. Базовый замер: 238,6 RPS, p95 168,4 мс, 0% ошибок; узкое место — база данных. Изучены слои образа Docker, сеть compose и блокировка `FOR UPDATE` против двойной продажи последнего товара."
+  }
+ ]
+}

@@ -1,0 +1,414 @@
+{
+ "toc": true,
+ "style": {
+  "font": "Times New Roman",
+  "size": 14,
+  "line": 1.5,
+  "margins_mm": [
+   30,
+   15,
+   20,
+   20
+  ]
+ },
+ "blocks": [
+  {
+   "type": "h1",
+   "text": "Цель работы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Добавить перед балансировщиком edge-кэш (учебную модель CDN) и построить мониторинг: метрики приложения и экспортеры, сбор в Prometheus, дашборд в Grafana."
+  },
+  {
+   "type": "h1",
+   "text": "Анализ и постановка",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Edge-кэш кэширует только общие для всех ответы. Что кэшируется и что собирает мониторинг — в таблицах 1 и 2."
+  },
+  {
+   "type": "table",
+   "caption": "Политика edge-кэша",
+   "header": [
+    "Путь",
+    "Кэш",
+    "Причина"
+   ],
+   "rows": [
+    [
+     "/products*, /stats*",
+     "10 с (200), 5 с (404)",
+     "одинаковы для всех пользователей"
+    ],
+    [
+     "/orders*",
+     "нет",
+     "персональные данные, POST"
+    ],
+    [
+     "/health, /docs",
+     "нет",
+     "служебные"
+    ]
+   ]
+  },
+  {
+   "type": "table",
+   "caption": "Источники метрик",
+   "header": [
+    "Компонент",
+    "Источник",
+    "Ключевые метрики"
+   ],
+   "rows": [
+    [
+     "app1–app3",
+     "/metrics (prometheus_client)",
+     "запросы, гистограмма времени, кэш"
+    ],
+    [
+     "consumer",
+     ":9100/metrics",
+     "обработанные заказы, время обработки"
+    ],
+    [
+     "edge",
+     "nginx-prometheus-exporter",
+     "соединения, запросы"
+    ],
+    [
+     "PostgreSQL ×3",
+     "postgres-exporter",
+     "транзакции, соединения, строки"
+    ],
+    [
+     "Redis ×6",
+     "redis_exporter (multi-target)",
+     "команды, память, попадания"
+    ],
+    [
+     "RabbitMQ",
+     "встроенный плагин :15692",
+     "глубина очереди по метке queue"
+    ]
+   ]
+  },
+  {
+   "type": "h1",
+   "text": "Выполнение работы",
+   "numbered": true
+  },
+  {
+   "type": "h2",
+   "text": "Схема стенда"
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab8_stand.png",
+   "caption": "Итоговая схема стенда (лаба 8)",
+   "width_cm": 16
+  },
+  {
+   "type": "p",
+   "text": "Итоговый стенд (рисунок 1): клиент → edge → lb → воркеры; мониторинг опрашивает все сервисы раз в 5 секунд."
+  },
+  {
+   "type": "h2",
+   "text": "Edge-кэш"
+  },
+  {
+   "type": "p",
+   "text": "`proxy_cache_lock` пропускает к origin только один запрос за устаревшим ответом, `proxy_cache_use_stale` отдаёт старую копию, если origin недоступен:"
+  },
+  {
+   "type": "code",
+   "lang": "nginx",
+   "path": "edge/default.conf",
+   "text": "resolver 127.0.0.11 valid=5s ipv6=off;\n\n# Кэш на диске контейнера: 10 МБ ключей в памяти (~80 000 ответов), до 200 МБ данных.\n# Не запрашивался 10 минут — удаляется.\nproxy_cache_path /var/cache/nginx/edge levels=1:2 keys_zone=edge:10m\n                 max_size=200m inactive=10m use_temp_path=off;\n\nupstream origin {\n    zone origin 64k;\n    server lb:80 resolve;\n    keepalive 32;\n}\n\nserver {\n    listen 80;\n\n    # Общие настройки проксирования для всех location\n    proxy_http_version 1.1;\n    proxy_set_header Connection \"\";\n    proxy_set_header Host $host;\n    proxy_set_header X-Real-IP $remote_addr;\n    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\n    # Каталог и статистика — одинаковые для всех пользователей, их кэшируем.\n    location ~ ^/(products|stats)(/|$) {\n        proxy_pass http://origin;\n\n        proxy_cache edge;\n        proxy_cache_key $request_method$request_uri;\n        # «Микрокэш»: 10 секунд. Цена/остаток на витрине отстают максимум на 10 с,\n        # зато популярный товар origin отдаёт 1 раз в 10 с, а не сотни раз\n        proxy_cache_valid 200 10s;\n        proxy_cache_valid 404 5s;\n\n        # Пришло 100 запросов за одним и тем же устаревшим ответом —\n        # к origin идёт только один, остальные ждут его (защита от «стада»)\n        proxy_cache_lock on;\n        proxy_cache_lock_timeout 2s;\n        # Пока ответ обновляется в фоне или origin упал — отдаём устаревшую копию\n        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;\n        proxy_cache_background_update on;\n\n        # HIT / MISS / EXPIRED / STALE / UPDATING — видно в заголовках ответа\n        add_header X-Cache-Status $upstream_cache_status always;\n    }\n\n    # Всё остальное (заказы, /health, /docs) — без кэша\n    location / {\n        proxy_pass http://origin;\n    }\n}"
+  },
+  {
+   "type": "h2",
+   "text": "Метрики приложения"
+  },
+  {
+   "type": "p",
+   "text": "Метка — шаблон маршрута (`/products/{product_id}`), а не реальный путь, иначе каждый из 200 000 товаров стал бы отдельным временным рядом. `/metrics` закрыт снаружи в `nginx/default.conf`."
+  },
+  {
+   "type": "code",
+   "lang": "python",
+   "path": "app/main.py",
+   "text": "# --- Метрики для Prometheus (лаб 8) ---\nREQUESTS = Counter(\"http_requests_total\", \"HTTP-запросы\",\n                   [\"method\", \"route\", \"status\"])\nLATENCY = Histogram(\"http_request_duration_seconds\", \"Время ответа\",\n                    [\"method\", \"route\"],\n                    buckets=(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1,\n                             0.25, 0.5, 1.0, 2.5, 5.0))\n\n\n@app.middleware(\"http\")\nasync def instance_and_metrics(request: Request, call_next):\n    start = time.perf_counter()\n    status = 500\n    try:\n        response = await call_next(request)\n        status = response.status_code\n        # К каждому ответу добавляем имя воркера\n        response.headers[\"X-Instance\"] = INSTANCE\n        return response\n    finally:\n        # Метка — шаблон маршрута (/products/{product_id}), а не реальный путь:\n        # иначе каждый id товара стал бы отдельным временным рядом\n        route = request.scope.get(\"route\")\n        path = route.path if route is not None else \"other\"\n        if path != \"/metrics\":\n            LATENCY.labels(request.method, path).observe(time.perf_counter() - start)\n            REQUESTS.labels(request.method, path, str(status)).inc()"
+  },
+  {
+   "type": "h2",
+   "text": "Prometheus"
+  },
+  {
+   "type": "code",
+   "lang": "yaml",
+   "path": "monitoring/prometheus.yml",
+   "text": "# Prometheus каждые 5 секунд опрашивает (scrape) /metrics всех сервисов\n# и хранит временные ряды. Интерфейс: http://localhost:9090 → Status → Targets.\nglobal:\n  scrape_interval: 5s\n  evaluation_interval: 5s\n\nscrape_configs:\n  - job_name: prometheus\n    static_configs:\n      - targets: [\"localhost:9090\"]\n\n  # Воркеры приложения: запросы, время ответа, кэш, CPU процесса\n  - job_name: app\n    static_configs:\n      - targets: [\"app1:8000\", \"app2:8000\", \"app3:8000\"]\n\n  # Обработчик очереди заказов\n  - job_name: consumer\n    static_configs:\n      - targets: [\"consumer:9100\"]\n\n  # Edge-кэш (CDN): соединения и запросы nginx\n  - job_name: edge\n    static_configs:\n      - targets: [\"nginx-exporter:9113\"]\n\n  # PostgreSQL: по экспортеру на каждый сервер\n  - job_name: postgres\n    static_configs:\n      - targets: [\"pg-exporter:9187\"]\n        labels: { db: primary }\n      - targets: [\"pg-exporter-r1:9187\"]\n        labels: { db: replica1 }\n      - targets: [\"pg-exporter-r2:9187\"]\n        labels: { db: replica2 }\n\n  # Redis Cluster: один экспортер опрашивает все 6 узлов (multi-target).\n  # Prometheus подставляет адрес узла в параметр ?target=...\n  - job_name: redis\n    metrics_path: /scrape\n    static_configs:\n      - targets:\n          - redis://redis1:6379\n          - redis://redis2:6379\n          - redis://redis3:6379\n          - redis://redis4:6379\n          - redis://redis5:6379\n          - redis://redis6:6379\n    relabel_configs:\n      - source_labels: [__address__]\n        target_label: __param_target\n      - source_labels: [__param_target]\n        target_label: instance\n      - target_label: __address__\n        replacement: redis-exporter:9121\n\n  # RabbitMQ: встроенный плагин rabbitmq_prometheus\n  - job_name: rabbitmq\n    static_configs:\n      - targets: [\"rabbitmq:15692\"]"
+  },
+  {
+   "type": "h1",
+   "text": "Тестирование",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Функциональные проверки выполнены скриптом `scripts/smoke.sh` на итоговом стенде (после лаб 8; `docker compose up -d --build`), последний прогон — 25.11.2026: пройдено 26 из 26. Нагрузочные замеры k6 сняты в момент сдачи каждой лабы и сохранены в `results/`. Результаты по лабе 8 — в таблице 3."
+  },
+  {
+   "type": "table",
+   "caption": "Тест-кейсы",
+   "header": [
+    "ID",
+    "Сценарий",
+    "Ожидается",
+    "Фактически",
+    "Статус"
+   ],
+   "rows": [
+    [
+     "T8.1",
+     "Повторный GET через edge — X-Cache-Status",
+     "HIT",
+     "HIT",
+     "пройден"
+    ],
+    [
+     "T8.2",
+     "POST /orders — заголовков X-Cache-Status",
+     "0",
+     "0",
+     "пройден"
+    ],
+    [
+     "T8.3",
+     "Цели Prometheus в состоянии up",
+     "16 / 16",
+     "16 / 16",
+     "пройден"
+    ],
+    [
+     "T8.4",
+     "Метрика очереди с меткой queue=\"orders\"",
+     "1",
+     "1",
+     "пройден"
+    ],
+    [
+     "T8.5",
+     "Панелей в дашборде Grafana",
+     "21",
+     "21",
+     "пройден"
+    ],
+    [
+     "T8.m",
+     "GET /metrics снаружи (через edge)",
+     "404",
+     "404",
+     "пройден"
+    ],
+    [
+     "T8.k6",
+     "Нагрузочный тест `k6/load.js` (до 50 VU, 70 с)",
+     "ошибок < 1%, p95 < 500 мс",
+     "ошибок 0,00%, p95 11,2 мс, 292,6 RPS",
+     "пройден"
+    ]
+   ]
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "2 × GET http://localhost:8080/products/{новый id}",
+   "text": "HTTP/1.1 200 OK\nx-cache: MISS\nX-Cache-Status: MISS\n\nHTTP/1.1 200 OK\nx-cache: MISS\nX-Cache-Status: HIT"
+  },
+  {
+   "type": "p",
+   "text": "Первый ответ — промах edge (MISS), второй отдан из edge (HIT) и до приложения не дошёл. Фрагмент метрик воркера app1:"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "app1: GET http://localhost:8000/metrics (фрагмент)",
+   "text": "cache_requests_total{result=\"miss\"} 3356.0\ncache_requests_total{result=\"hit\"} 1704.0\nhttp_requests_total{method=\"GET\",route=\"/products/{product_id}\",status=\"200\"} 4141.0\nhttp_request_duration_seconds_bucket{le=\"0.001\",method=\"GET\",route=\"/products/{product_id}\"} 1425.0\nhttp_request_duration_seconds_bucket{le=\"0.0025\",method=\"GET\",route=\"/products/{product_id}\"} 4065.0\nhttp_request_duration_seconds_bucket{le=\"0.005\",method=\"GET\",route=\"/products/{product_id}\"} 4136.0"
+  },
+  {
+   "type": "p",
+   "text": "Все цели Prometheus в состоянии up (рисунок 2)."
+  },
+  {
+   "type": "figure",
+   "path": "../img/prometheus-targets.png",
+   "caption": "Prometheus → Status → Targets",
+   "width_cm": 16
+  },
+  {
+   "type": "p",
+   "text": "Дашборд «Мини-магазин» в Grafana во время нагрузочного теста (рисунки 3 и 4)."
+  },
+  {
+   "type": "figure",
+   "path": "../img/grafana-app.png",
+   "caption": "Grafana: запросы, время ответа и CPU воркеров",
+   "width_cm": 16
+  },
+  {
+   "type": "figure",
+   "path": "../img/grafana-cache-queue.png",
+   "caption": "Grafana: кэш Redis и очередь заказов",
+   "width_cm": 16
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "docker compose run --rm k6 run /scripts/load.js",
+   "text": "метрика                      avg       med     p(95)\nhttp_req_duration         2.14ms  436.05µs   11.18ms\nname:list               505.47µs  388.08µs   698.7µs\nname:order               15.73ms   14.58ms   23.24ms\nname:product              1.56ms  441.43µs    5.17ms\nname:search               5.71ms    5.89ms     8.7ms\nname:top                446.25µs  388.51µs  660.19µs\nhttp_req_failed       0.00% 0 out of 20506\nhttp_reqs             20506 292.58264/s"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "docker stats",
+   "text": "shop-nginx-exporter-1 0.28% 7.066MiB / 32MiB\nshop-edge-1 19.17% 38.47MiB / 128MiB\nshop-lb-1 5.06% 11.93MiB / 64MiB\nshop-grafana-1 0.18% 92.69MiB / 256MiB\nshop-app2-1 15.77% 60.82MiB / 200MiB\nshop-app1-1 15.81% 60.79MiB / 200MiB\nshop-prometheus-1 1.25% 48.14MiB / 256MiB\nshop-pg-exporter-r1-1 0.64% 7.293MiB / 48MiB\nshop-pg-exporter-1 0.00% 7.676MiB / 48MiB\nshop-consumer-1 3.15% 29.65MiB / 128MiB\nshop-pg-exporter-r2-1 0.00% 7.852MiB / 48MiB\nshop-app3-1 15.34% 60.94MiB / 200MiB\nshop-redis-exporter-1 1.75% 10.69MiB / 32MiB\nshop-rabbitmq-1 7.37% 139.4MiB / 384MiB\nshop-postgres-r1-1 5.37% 163.8MiB / 384MiB\nshop-postgres-r2-1 10.12% 163.7MiB / 384MiB\nshop-pgbouncer-1 3.75% 8.48MiB / 64MiB\nshop-postgres-1 5.62% 365MiB / 512MiB\nshop-redis4-1 1.07% 7.234MiB / 96MiB\nshop-redis5-1 0.77% 6.961MiB / 96MiB\nshop-redis6-1 0.60% 7.625MiB / 96MiB\nshop-redis1-1 5.11% 6.984MiB / 96MiB\nshop-redis3-1 4.32% 7.02MiB / 96MiB\nshop-redis2-1 4.40% 7.402MiB / 96MiB"
+  },
+  {
+   "type": "h1",
+   "text": "Результаты",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Итоговый журнал замеров за весь практикум — в таблице 4 и на рисунке 5."
+  },
+  {
+   "type": "table",
+   "caption": "Итоговый журнал замеров (k6/load.js)",
+   "header": [
+    "Лаб",
+    "RPS",
+    "p95, мс",
+    "Ошибки, %",
+    "p95 order, мс",
+    "Узкое место"
+   ],
+   "rows": [
+    [
+     "1",
+     "238,6",
+     "168,4",
+     "0,00",
+     "235,2",
+     "postgres (до 800% CPU)"
+    ],
+    [
+     "2",
+     "240,3",
+     "204,7",
+     "0,00",
+     "216,8",
+     "postgres (до 780% CPU)"
+    ],
+    [
+     "3",
+     "266,3",
+     "204,6",
+     "0,00",
+     "209,9",
+     "воркеры app (до 32% при лимите 50%)"
+    ],
+    [
+     "4",
+     "261,6",
+     "205,8",
+     "0,00",
+     "220,6",
+     "воркеры app (до 39% при лимите 50%)"
+    ],
+    [
+     "5",
+     "289,2",
+     "10,5",
+     "0,00",
+     "39,3",
+     "воркеры app (~33%), postgres ~32%"
+    ],
+    [
+     "6",
+     "287,9",
+     "12,7",
+     "0,00",
+     "24,9",
+     "воркеры app (~32%), primary ~5%"
+    ],
+    [
+     "7",
+     "288,6",
+     "12,1",
+     "0,00",
+     "28,0",
+     "воркеры app (~32%), БД почти не нагружены"
+    ],
+    [
+     "8",
+     "292,6",
+     "11,2",
+     "0,00",
+     "23,2",
+     "нет: edge ~19%, воркеры ~16%"
+    ]
+   ]
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab8_p95.png",
+   "caption": "p95 всех запросов и заказа по лабам 1–8",
+   "width_cm": 16
+  },
+  {
+   "type": "p",
+   "text": "Edge-кэш принял ~60% запросов, CPU воркеров упал вдвое (32% → 16%), медиана ответа — 0,44 мс. За практикум p95 снизился с 168,4 до 11,2 мс, p95 заказа — с 235,2 до 23,2 мс при нуле ошибок. RPS ограничен самим тестом; стресс-тест лабы 7 показал 667 RPS."
+  },
+  {
+   "type": "h1",
+   "text": "Контрольные вопросы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "**Как работает edge-кэш?** `edge/default.conf`: nginx перед балансировщиком кэширует ответы каталога на 10 с («микрокэш»). `proxy_cache_lock` — за устаревшим ответом к origin идёт один запрос, а не сто. `proxy_cache_use_stale` — если origin упал, отдаётся старая копия. Заголовок `X-Cache-Status: HIT/MISS`. Edge принял на себя ~60% запросов, CPU воркеров упал вдвое."
+  },
+  {
+   "type": "p",
+   "text": "**Минусы CDN-кэша?** Данные могут отставать на TTL (остаток товара — до 10 с). Инвалидацию из приложения (удаление ключа при заказе) edge не видит — у настоящих CDN для этого есть purge API. Персональные данные (заказы, корзина) кэшировать нельзя, поэтому кэшируются только `/products` и `/stats`."
+  },
+  {
+   "type": "p",
+   "text": "**Как устроен мониторинг?** Приложение отдаёт метрики на `/metrics` (счётчик запросов, гистограмма времени ответа по маршрутам, попадания в кэш). Экспортеры переводят статистику PostgreSQL, Redis, nginx в формат Prometheus, у RabbitMQ встроенный плагин. Prometheus опрашивает всех раз в 5 с, Grafana рисует дашборд «Мини-магазин»."
+  },
+  {
+   "type": "p",
+   "text": "**Почему p95 считают из гистограммы, а не храня все времена?** Гистограмма — это счётчики по корзинам (≤5 мс, ≤10 мс…). Их можно складывать между воркерами и по времени, а `histogram_quantile` оценивает перцентиль. Хранить каждое значение слишком дорого."
+  },
+  {
+   "type": "p",
+   "text": "**Почему метка — шаблон маршрута, а не путь?** `/products/{product_id}` вместо `/products/123`: иначе каждый товар стал бы отдельным временным рядом (200 000 рядов — «взрыв кардинальности»)."
+  },
+  {
+   "type": "h1",
+   "text": "Выводы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Добавлены edge-кэш с микрокэшем 10 с и полный мониторинг: метрики приложения и consumer, экспортеры PostgreSQL, Redis и nginx, Prometheus и дашборд Grafana. Проверено: повторные запросы каталога отдаются edge (HIT), заказы не кэшируются, все 16 целей Prometheus доступны. Ограничения: edge не видит инвалидацию из приложения (остаток на витрине отстаёт до 10 с), PgBouncer и edge работают в одном экземпляре."
+  }
+ ]
+}

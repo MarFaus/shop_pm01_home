@@ -1,0 +1,336 @@
+{
+ "toc": true,
+ "style": {
+  "font": "Times New Roman",
+  "size": 14,
+  "line": 1.5,
+  "margins_mm": [
+   30,
+   15,
+   20,
+   20
+  ]
+ },
+ "blocks": [
+  {
+   "type": "h1",
+   "text": "Цель работы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Вынести медленную оплату заказа из запроса пользователя в очередь RabbitMQ: API резервирует товар и сразу отвечает `202 Accepted`, а оплату выполняет отдельный обработчик (consumer)."
+  },
+  {
+   "type": "h1",
+   "text": "Анализ и постановка",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Заказ нельзя потерять ни при сбое публикации, ни при перезапуске брокера, ни при повторной доставке. Меры надёжности — в таблице 1."
+  },
+  {
+   "type": "table",
+   "caption": "Гарантии доставки заказа",
+   "header": [
+    "Риск",
+    "Решение"
+   ],
+   "rows": [
+    [
+     "Перезапуск RabbitMQ",
+     "durable-очередь + persistent-сообщения"
+    ],
+    [
+     "Брокер не принял сообщение",
+     "publisher_confirms"
+    ],
+    [
+     "Consumer увидел заказ раньше коммита",
+     "публикация после коммита транзакции"
+    ],
+    [
+     "Публикация не удалась",
+     "consumer переотправляет pending старше 5 минут"
+    ],
+    [
+     "Повторная доставка",
+     "UPDATE … WHERE status = 'pending' (идемпотентность)"
+    ],
+    [
+     "Ошибка обработки",
+     "dead letter queue orders.dead"
+    ]
+   ]
+  },
+  {
+   "type": "h1",
+   "text": "Выполнение работы",
+   "numbered": true
+  },
+  {
+   "type": "h2",
+   "text": "Схема стенда"
+  },
+  {
+   "type": "p",
+   "text": "Добавлены сервисы `rabbitmq` и `consumer` (рисунок 1)."
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab5_stand.png",
+   "caption": "Схема стенда лабы 5",
+   "width_cm": 16
+  },
+  {
+   "type": "h2",
+   "text": "Публикация заказа"
+  },
+  {
+   "type": "code",
+   "lang": "python",
+   "path": "app/mq.py",
+   "text": "async def declare(channel: aio_pika.abc.AbstractChannel) -> aio_pika.abc.AbstractQueue:\n    \"\"\"Объявить очереди. Вызывают и API, и consumer — кто стартует первым.\"\"\"\n    await channel.declare_queue(DEAD_QUEUE, durable=True)\n    # durable — очередь переживает перезапуск RabbitMQ;\n    # x-dead-letter-* — отклонённые сообщения уходят в orders.dead, а не теряются\n    return await channel.declare_queue(\n        QUEUE, durable=True,\n        arguments={\"x-dead-letter-exchange\": \"\", \"x-dead-letter-routing-key\": DEAD_QUEUE},\n    )\n\n\nasync def init() -> None:\n    global _connection, _channel\n    # connect_robust сам переподключается, если RabbitMQ перезапустился\n    _connection = await aio_pika.connect_robust(RABBITMQ_URL)\n    # publisher_confirms: publish() ждёт подтверждения, что брокер принял сообщение\n    _channel = await _connection.channel(publisher_confirms=True)\n    await declare(_channel)\n\n\nasync def close() -> None:\n    if _connection is not None:\n        await _connection.close()\n\n\nasync def publish_order(order_id: int) -> None:\n    message = aio_pika.Message(\n        json.dumps({\"order_id\": order_id}).encode(),\n        content_type=\"application/json\",\n        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,   # сообщение пишется на диск\n    )\n    await _channel.default_exchange.publish(message, routing_key=QUEUE)"
+  },
+  {
+   "type": "p",
+   "text": "Создание заказа: товар резервируется в транзакции, заказ сохраняется со статусом `pending`, после коммита номер публикуется в очередь:"
+  },
+  {
+   "type": "code",
+   "lang": "python",
+   "path": "app/main.py",
+   "text": "@app.post(\"/orders\", status_code=202)\nasync def create_order(order: OrderIn):\n    \"\"\"Резервирует товар и ставит заказ в очередь на оплату.\n\n    202 Accepted: заказ принят, но ещё не обработан (status = pending).\n    Оплату (медленный платёжный шлюз) выполняет consumer.py.\n    \"\"\"\n    # Запись — только на primary (реплики доступны лишь для чтения)\n    async with db.primary.acquire() as conn:\n        async with conn.transaction():\n            # FOR UPDATE блокирует строку: два покупателя не купят один товар\n            product = await conn.fetchrow(\n                \"SELECT price, stock FROM products WHERE id = $1 FOR UPDATE\",\n                order.product_id,\n            )\n            if product is None:\n                raise HTTPException(404, \"Товар не найден\")\n            if product[\"stock\"] < order.quantity:\n                raise HTTPException(409, \"Недостаточно товара на складе\")\n            await conn.execute(\n                \"UPDATE products SET stock = stock - $1 WHERE id = $2\",\n                order.quantity, order.product_id,\n            )\n            row = await conn.fetchrow(\n                \"\"\"INSERT INTO orders (product_id, quantity, total, status)\n                   VALUES ($1, $2, $3, 'pending')\n                   RETURNING id, product_id, quantity, total, status, created_at\"\"\",\n                order.product_id, order.quantity, product[\"price\"] * order.quantity,\n            )\n    # Публикуем ПОСЛЕ коммита: consumer не должен увидеть заказ, которого ещё нет в БД\n    try:\n        await mq.publish_order(row[\"id\"])\n    except Exception as exc:  # noqa: BLE001\n        # Заказ уже сохранён — не теряем его: consumer переотправит «застрявшие» pending\n        log.warning(\"заказ %s не поставлен в очередь: %r\", row[\"id\"], exc)\n    # Инвалидация: остаток товара изменился — старая карточка в кэше неверна\n    await cache.delete(f\"product:{order.product_id}\")\n    return dict(row)"
+  },
+  {
+   "type": "h2",
+   "text": "Обработчик очереди"
+  },
+  {
+   "type": "p",
+   "text": "Consumer берёт до 50 сообщений одновременно (prefetch): пока одно ждёт «шлюз» 0,2 с, обрабатываются остальные — около 250 заказов в секунду."
+  },
+  {
+   "type": "code",
+   "lang": "python",
+   "path": "app/consumer.py",
+   "text": "async def process(pool: asyncpg.Pool, message: aio_pika.abc.AbstractIncomingMessage) -> None:\n    # requeue=False: при исключении сообщение уходит в orders.dead, а не по кругу\n    async with message.process(requeue=False):\n        order_id = json.loads(message.body)[\"order_id\"]\n        with PROCESSING.time():\n            await asyncio.sleep(PAYMENT_DELAY)   # имитация платёжного шлюза\n            # AND status = 'pending' — идемпотентность: повторное сообщение ничего не испортит\n            result = await pool.execute(\n                \"\"\"UPDATE orders SET status = 'processed', processed_at = now()\n                   WHERE id = $1 AND status = 'pending'\"\"\",\n                order_id,\n            )\n        if result == \"UPDATE 1\":\n            ORDERS.labels(\"processed\").inc()\n        else:\n            ORDERS.labels(\"skipped\").inc()\n            log.info(\"заказ %s уже обработан или не найден\", order_id)\n\n\nasync def resend_stuck(pool: asyncpg.Pool) -> None:\n    \"\"\"Страховка: API создало заказ, но не смогло положить его в очередь.\"\"\"\n    while True:\n        await asyncio.sleep(60)\n        try:\n            ids = await pool.fetch(\n                f\"\"\"SELECT id FROM orders\n                    WHERE status = 'pending' AND created_at < now() - interval '{STUCK_AFTER}'\n                    LIMIT 500\"\"\"\n            )\n            for row in ids:\n                await mq.publish_order(row[\"id\"])\n            if ids:\n                log.warning(\"повторно отправлено застрявших заказов: %d\", len(ids))\n        except Exception as exc:  # noqa: BLE001\n            log.warning(\"resend_stuck: %r\", exc)"
+  },
+  {
+   "type": "p",
+   "text": "Ограничения брокера заданы в `rabbitmq/limits.conf`; healthcheck выполняется через `nc -z` — штатный `rabbitmq-diagnostics` давал всплески CPU до 150% каждые 10 с."
+  },
+  {
+   "type": "code",
+   "lang": "ini",
+   "path": "rabbitmq/limits.conf",
+   "text": "# Ограничения RabbitMQ (дополняют стандартный конфиг образа).\n# Контейнеру выделено 384 МБ. Когда RabbitMQ займёт 256 МБ, он включит\n# «flow control» и притормозит издателей, а не упадёт по нехватке памяти.\nvm_memory_high_watermark.absolute = 256MiB\n# Если на диске осталось меньше 200 МБ — тоже притормозить издателей\ndisk_free_limit.absolute = 200MB\n# Метрики для Prometheus по каждой очереди (с меткой queue), а не сумма всех\nprometheus.return_per_object_metrics = true"
+  },
+  {
+   "type": "h1",
+   "text": "Тестирование",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Функциональные проверки выполнены скриптом `scripts/smoke.sh` на итоговом стенде (после лаб 8; `docker compose up -d --build`), последний прогон — 25.11.2026: пройдено 26 из 26. Нагрузочные замеры k6 сняты в момент сдачи каждой лабы и сохранены в `results/`. Результаты по лабе 5 — в таблице 2."
+  },
+  {
+   "type": "table",
+   "caption": "Тест-кейсы",
+   "header": [
+    "ID",
+    "Сценарий",
+    "Ожидается",
+    "Фактически",
+    "Статус"
+   ],
+   "rows": [
+    [
+     "T5.1",
+     "POST /orders — код ответа",
+     "202",
+     "202",
+     "пройден"
+    ],
+    [
+     "T5.2",
+     "Статус заказа через 1 с",
+     "processed",
+     "processed",
+     "пройден"
+    ],
+    [
+     "T5.3",
+     "GET /products/77 после заказа — X-Cache",
+     "MISS",
+     "MISS",
+     "пройден"
+    ],
+    [
+     "T5.r",
+     "Всплеск 150 заказов/с (k6/orders.js)",
+     "очередь не копится",
+     "p95 22 мс, очередь пустая",
+     "пройден"
+    ],
+    [
+     "T5.o",
+     "Перегрузка 300 заказов/с",
+     "0 ошибок, очередь разбирается",
+     "пик ~1200, разобрана за ~10 с",
+     "пройден"
+    ],
+    [
+     "T5.k6",
+     "Нагрузочный тест `k6/load.js` (до 50 VU, 70 с)",
+     "ошибок < 1%, p95 < 500 мс",
+     "ошибок 0,00%, p95 10,5 мс, 289,2 RPS",
+     "пройден"
+    ]
+   ]
+  },
+  {
+   "type": "p",
+   "text": "Заказ принимается со статусом `pending` и через секунду уже обработан:"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "POST /orders {\"product_id\":555,\"quantity\":1}",
+   "text": "{\"id\":519558,\"product_id\":555,\"quantity\":1,\"total\":595.94,\"status\":\"pending\",\"created_at\":\"2026-11-25T15:47:13.503136+00:00\"}\nHTTP 202"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "GET /orders/{id} через 1 с",
+   "text": "{\"id\":519558,\"product_id\":555,\"quantity\":1,\"total\":595.94,\"status\":\"processed\",\"created_at\":\"2026-11-25T15:47:13.503136+00:00\",\"processed_at\":\"2026-11-25T15:47:13.708197+00:00\"}"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "rabbitmqctl list_queues",
+   "text": "Listing queues for vhost / ...\nname\tdurable\tmessages\tconsumers\targuments\norders.dead\ttrue\t0\t0\t[]\norders\ttrue\t0\t1\t[{\"x-dead-letter-exchange\",[]},{\"x-dead-letter-routing-key\",\"orders.dead\"}]"
+  },
+  {
+   "type": "p",
+   "text": "Всплеск 300 заказов/с: очередь выросла до ~1200 сообщений и была разобрана после окончания теста (рисунок 2)."
+  },
+  {
+   "type": "figure",
+   "path": "../img/rabbitmq-queue.png",
+   "caption": "Очередь orders в RabbitMQ Management во время всплеска заказов",
+   "width_cm": 16
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "docker compose run --rm k6 run /scripts/load.js",
+   "text": "метрика                      avg       med     p(95)\nhttp_req_duration         3.46ms    2.36ms   10.53ms\nname:list                 2.97ms    2.22ms    5.71ms\nname:order               15.98ms    12.2ms   39.29ms\nname:product               2.6ms    2.32ms    4.63ms\nname:search               5.57ms    5.25ms    9.32ms\nname:top                  2.26ms    1.89ms    3.48ms\nhttp_req_failed       0.00% 0 out of 20254\nhttp_reqs             20254 289.218488/s"
+  },
+  {
+   "type": "h1",
+   "text": "Результаты",
+   "numbered": true
+  },
+  {
+   "type": "table",
+   "caption": "Журнал замеров (k6/load.js)",
+   "header": [
+    "Лаб",
+    "RPS",
+    "p95, мс",
+    "Ошибки, %",
+    "p95 order, мс",
+    "Узкое место"
+   ],
+   "rows": [
+    [
+     "1",
+     "238,6",
+     "168,4",
+     "0,00",
+     "235,2",
+     "postgres (до 800% CPU)"
+    ],
+    [
+     "2",
+     "240,3",
+     "204,7",
+     "0,00",
+     "216,8",
+     "postgres (до 780% CPU)"
+    ],
+    [
+     "3",
+     "266,3",
+     "204,6",
+     "0,00",
+     "209,9",
+     "воркеры app (до 32% при лимите 50%)"
+    ],
+    [
+     "4",
+     "261,6",
+     "205,8",
+     "0,00",
+     "220,6",
+     "воркеры app (до 39% при лимите 50%)"
+    ],
+    [
+     "5",
+     "289,2",
+     "10,5",
+     "0,00",
+     "39,3",
+     "воркеры app (~33%), postgres ~32%"
+    ]
+   ]
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab5_p95.png",
+   "caption": "p95 всех запросов и заказа по лабам 1–5",
+   "width_cm": 16
+  },
+  {
+   "type": "p",
+   "text": "Заказ больше не ждёт шлюз: p95 заказа снизился с 220,6 до 39,3 мс, общий p95 — с 205,8 до 10,5 мс (таблица 3, рисунок 3)."
+  },
+  {
+   "type": "h1",
+   "text": "Контрольные вопросы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "**Зачем очередь?** Медленная часть (платёжный шлюз, 0,2 с) уходит из запроса пользователя. API резервирует товар, сохраняет заказ со статусом `pending`, кладёт номер в очередь и сразу отвечает `202 Accepted`. `consumer.py` выполняет оплату и ставит `processed`. p95 заказа упал с ~210 до ~25 мс."
+  },
+  {
+   "type": "p",
+   "text": "**Как не потерять заказ?** Очередь `durable`, сообщения `persistent` (переживут перезапуск RabbitMQ), `publisher_confirms` (API ждёт, что брокер принял сообщение). Подтверждение (ack) consumer отправляет только после записи в БД. Если публикация не удалась, заказ уже в БД, и consumer раз в минуту переотправляет «застрявшие» pending."
+  },
+  {
+   "type": "p",
+   "text": "**Что если сообщение придёт дважды?** `UPDATE ... WHERE id = $1 AND status = 'pending'` — повтор ничего не изменит (идемпотентность). Сообщение, обработка которого упала с ошибкой, уходит в `orders.dead` (dead letter queue), а не крутится по кругу."
+  },
+  {
+   "type": "p",
+   "text": "**Что такое prefetch?** Сколько неподтверждённых сообщений consumer берёт сразу. 50 — пока одно ждёт шлюз, обрабатываются остальные: ~250 заказов/с."
+  },
+  {
+   "type": "p",
+   "text": "**Что показал всплеск 300 заказов/с?** Воркеры не успевали, очередь выросла до ~1200 и была разобрана за ~10 с после теста. Очередь сглаживает пики."
+  },
+  {
+   "type": "h1",
+   "text": "Выводы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Реализована асинхронная обработка заказов через RabbitMQ: API отвечает 202, оплату выполняет consumer. Обеспечены сохранность и идемпотентность (durable, persistent, confirms, DLQ, переотправка pending). Проверено, что очередь сглаживает всплеск в 300 заказов/с без ошибок. Ограничение: статус заказа становится `processed` не сразу, клиенту нужно опрашивать `GET /orders/{id}`."
+  }
+ ]
+}

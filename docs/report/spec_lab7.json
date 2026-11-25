@@ -1,0 +1,411 @@
+{
+ "toc": true,
+ "style": {
+  "font": "Times New Roman",
+  "size": 14,
+  "line": 1.5,
+  "margins_mm": [
+   30,
+   15,
+   20,
+   20
+  ]
+ },
+ "blocks": [
+  {
+   "type": "h1",
+   "text": "Цель работы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Ускорить работу с базой данных: добавить пул соединений PgBouncer, настроить `postgresql.conf`, создать индексы под запросы приложения и подтвердить эффект через `EXPLAIN ANALYZE` и `pg_stat_statements`."
+  },
+  {
+   "type": "h1",
+   "text": "Анализ и постановка",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Индексы подобраны под конкретные запросы приложения (таблица 1)."
+  },
+  {
+   "type": "table",
+   "caption": "Индексы и запросы",
+   "header": [
+    "Индекс",
+    "Запрос",
+    "Тип"
+   ],
+   "rows": [
+    [
+     "products (category_id, price DESC)",
+     "список категории",
+     "B-tree, готовый порядок"
+    ],
+    [
+     "products USING gin (name gin_trgm_ops)",
+     "поиск ILIKE '%…%'",
+     "GIN, pg_trgm"
+    ],
+    [
+     "orders (created_at) INCLUDE (product_id, quantity)",
+     "топ продаж за неделю",
+     "Index Only Scan"
+    ],
+    [
+     "orders (product_id)",
+     "внешний ключ",
+     "B-tree"
+    ],
+    [
+     "orders (created_at) WHERE status = 'pending'",
+     "поиск застрявших заказов",
+     "частичный"
+    ]
+   ]
+  },
+  {
+   "type": "p",
+   "text": "Индексы применяет одноразовый сервис `db-migrate`, а не init-скрипт: так можно сделать замер до и после."
+  },
+  {
+   "type": "h1",
+   "text": "Выполнение работы",
+   "numbered": true
+  },
+  {
+   "type": "h2",
+   "text": "Схема стенда"
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab7_stand.png",
+   "caption": "Схема стенда лабы 7",
+   "width_cm": 16
+  },
+  {
+   "type": "p",
+   "text": "Все обращения к БД идут через PgBouncer (рисунок 1)."
+  },
+  {
+   "type": "h2",
+   "text": "PgBouncer"
+  },
+  {
+   "type": "p",
+   "text": "Режим `transaction`: серверное соединение выдаётся на одну транзакцию. `dns_max_ttl = 2` добавлен после ошибки: PgBouncer кэшировал DNS и после пересоздания реплик ходил по старому IP."
+  },
+  {
+   "type": "code",
+   "lang": "ini",
+   "path": "pgbouncer/pgbouncer.ini",
+   "text": "[databases]\n; имя для клиента = куда идти на самом деле\nshop    = host=postgres    port=5432 dbname=shop\nshop_r1 = host=postgres-r1 port=5432 dbname=shop\nshop_r2 = host=postgres-r2 port=5432 dbname=shop\n\n[pgbouncer]\nlisten_addr = 0.0.0.0\nlisten_port = 6432\n\nauth_type = scram-sha-256\nauth_file = /etc/pgbouncer/userlist.txt\n\n; transaction — серверное соединение выдаётся на одну транзакцию и сразу\n; возвращается в пул. Самый экономный режим; нельзя держать состояние сессии\n; (SET, LISTEN, временные таблицы) между транзакциями.\npool_mode = transaction\n\n; Сколько клиентов принимаем и сколько настоящих соединений держим к каждой базе\nmax_client_conn = 1000\ndefault_pool_size = 20\nmin_pool_size = 5\nreserve_pool_size = 5\nreserve_pool_timeout = 1\n\n; asyncpg использует подготовленные выражения (prepared statements).\n; В режиме transaction PgBouncer (с версии 1.21) сам переносит их между\n; серверными соединениями — без этого были бы ошибки «prepared statement does not exist».\nmax_prepared_statements = 200\n\n; В Docker контейнер после пересоздания может получить другой IP (и даже IP\n; соседа). PgBouncer кэширует DNS (по умолчанию 15 с) — держим кэш коротким,\n; иначе после перезапуска реплик он может ходить по старому адресу.\ndns_max_ttl = 2\ndns_nxdomain_ttl = 2\n\n; Порвалось соединение с сервером — не ждать вечно\nserver_connect_timeout = 3\nserver_login_retry = 1\n; Клиент ждёт свободное серверное соединение не дольше 10 секунд, потом ошибка\nquery_wait_timeout = 10"
+  },
+  {
+   "type": "h2",
+   "text": "Настройка PostgreSQL"
+  },
+  {
+   "type": "code",
+   "lang": "ini",
+   "path": "db/conf/postgresql.conf",
+   "text": "# --- Память ---\n# Кэш страниц самого PostgreSQL: ~25% памяти контейнера\nshared_buffers = 128MB\n# Подсказка планировщику, сколько данных ОС держит в кэше (не выделяет память)\neffective_cache_size = 384MB\n# Память на одну сортировку/хэш в запросе. Осторожно: на каждую операцию каждого запроса\nwork_mem = 8MB\n# Для CREATE INDEX, VACUUM\nmaintenance_work_mem = 64MB\n\n# --- Диск: SSD ---\n# На SSD случайное чтение почти не дороже последовательного — планировщик\n# охотнее выбирает индексы (по умолчанию 4.0 — настройка для HDD)\nrandom_page_cost = 1.1\neffective_io_concurrency = 200\n\n# JIT-компиляция окупается на долгих аналитических запросах,\n# а на наших коротких только добавляет десятки миллисекунд\njit = off\n\n# --- Репликация (лаб 6) ---\nwal_level = replica\nmax_wal_senders = 10\nwal_keep_size = 256MB\n# Реплики держат слоты (db/replica-entrypoint.sh): WAL не удаляется, пока реплика\n# его не получила. Но не больше 2 ГБ — иначе мёртвая реплика забьёт диск primary\nmax_slot_wal_keep_size = 2GB\nhot_standby = on\n# Реплика сообщает primary, какие строки ей ещё нужны — меньше конфликтов запросов\nhot_standby_feedback = on\n\n# --- Наблюдение ---\n# Статистика по всем запросам: SELECT * FROM pg_stat_statements\nshared_preload_libraries = 'pg_stat_statements'\npg_stat_statements.track = all\ntrack_io_timing = on\n# Писать в лог запросы дольше 500 мс\nlog_min_duration_statement = 500"
+  },
+  {
+   "type": "h2",
+   "text": "Индексы"
+  },
+  {
+   "type": "code",
+   "lang": "sql",
+   "path": "db/sql/indexes.sql",
+   "text": "-- GET /products?category_id=..: фильтр по категории + сортировка по цене.\n-- Индекс уже упорядочен как нужно — PostgreSQL читает первые 20 строк и останавливается.\nCREATE INDEX IF NOT EXISTS products_category_price_idx\n    ON products (category_id, price DESC);\n\n-- GET /products/search: ILIKE '%abc%' обычный B-tree не ускорит (шаблон начинается с %).\n-- GIN по триграммам (pg_trgm) находит строки, содержащие все тройки букв шаблона.\nCREATE INDEX IF NOT EXISTS products_name_trgm_idx\n    ON products USING gin (name gin_trgm_ops);\n\n-- GET /stats/top-products: заказы за последние 7 дней.\n-- INCLUDE кладёт product_id и quantity прямо в индекс — таблицу читать не нужно\n-- (Index Only Scan).\nCREATE INDEX IF NOT EXISTS orders_created_at_idx\n    ON orders (created_at) INCLUDE (product_id, quantity);\n\n-- Внешний ключ orders.product_id: без индекса удаление товара перебирает все заказы\nCREATE INDEX IF NOT EXISTS orders_product_id_idx\n    ON orders (product_id);\n\n-- consumer ищет «застрявшие» pending-заказы. Частичный индекс: только pending,\n-- поэтому он крошечный, хотя заказов полмиллиона\nCREATE INDEX IF NOT EXISTS orders_pending_idx\n    ON orders (created_at) WHERE status = 'pending';\n\nANALYZE products;\nANALYZE orders;"
+  },
+  {
+   "type": "h2",
+   "text": "Находка pg_stat_statements"
+  },
+  {
+   "type": "p",
+   "text": "В топе `pg_stat_statements` оказались служебные `RESET ALL`, `pg_advisory_unlock_all()` и `CLOSE ALL` — asyncpg слал их после каждого запроса. Сброс отключён, так как состояния сессии в приложении нет:"
+  },
+  {
+   "type": "code",
+   "lang": "python",
+   "path": "app/db.py",
+   "text": "async def _no_reset(conn: asyncpg.Connection) -> None:\n    \"\"\"Не сбрасывать сессию при возврате соединения в пул.\n\n    По умолчанию asyncpg после КАЖДОГО запроса шлёт RESET ALL,\n    pg_advisory_unlock_all() и CLOSE ALL — лишний сетевой круг.\n    Мы не храним состояние в сессии (SET, блокировки, курсоры),\n    а PgBouncer в режиме transaction и так отдаёт соединение другим.\n    Это видно в pg_stat_statements (db/sql/top_queries.sql).\n    \"\"\"\n\n\nclass Database:\n    def __init__(self) -> None:\n        self.primary: asyncpg.Pool | None = None\n        self.replicas: list[asyncpg.Pool] = []\n        self._down_until: dict[int, float] = {}   # номер реплики → когда пробовать снова\n        self._rr = itertools.cycle([0])\n\n    async def connect(self) -> None:\n        self.primary = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=DB_POOL_MAX,\n                                                 reset=_no_reset)\n        # min_size=0: соединения с репликой открываются при первом запросе,\n        # поэтому приложение стартует, даже если реплика ещё не поднялась\n        self.replicas = [\n            await asyncpg.create_pool(url, min_size=0, max_size=DB_POOL_MAX, timeout=1,\n                                      reset=_no_reset)\n            for url in DATABASE_REPLICA_URLS\n        ]\n        if self.replicas:\n            self._rr = itertools.cycle(range(len(self.replicas)))"
+  },
+  {
+   "type": "h1",
+   "text": "Тестирование",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Функциональные проверки выполнены скриптом `scripts/smoke.sh` на итоговом стенде (после лаб 8; `docker compose up -d --build`), последний прогон — 25.11.2026: пройдено 26 из 26. Нагрузочные замеры k6 сняты в момент сдачи каждой лабы и сохранены в `results/`. Результаты по лабе 7 — в таблице 2."
+  },
+  {
+   "type": "table",
+   "caption": "Тест-кейсы",
+   "header": [
+    "ID",
+    "Сценарий",
+    "Ожидается",
+    "Фактически",
+    "Статус"
+   ],
+   "rows": [
+    [
+     "T7.1",
+     "Созданные индексы (pg_indexes)",
+     "5",
+     "5",
+     "пройден"
+    ],
+    [
+     "T7.2",
+     "Индекс pg_trgm на реплике",
+     "1",
+     "1",
+     "пройден"
+    ],
+    [
+     "T7.3",
+     "SHOW jit",
+     "off",
+     "off",
+     "пройден"
+    ],
+    [
+     "T7.4",
+     "Расширения pg_stat_statements и pg_trgm",
+     "2",
+     "2",
+     "пройден"
+    ],
+    [
+     "T7.5",
+     "SHOW DATABASES в PgBouncer — пулов shop*",
+     "3",
+     "3",
+     "пройден"
+    ],
+    [
+     "T7.s",
+     "Стресс-тест 300 VU (k6/stress.js)",
+     "0 ошибок",
+     "667 RPS, 0 ошибок, p95 570 мс",
+     "пройден"
+    ],
+    [
+     "T7.k6",
+     "Нагрузочный тест `k6/load.js` (до 50 VU, 70 с)",
+     "ошибок < 1%, p95 < 500 мс",
+     "ошибок 0,00%, p95 12,1 мс, 288,6 RPS",
+     "пройден"
+    ]
+   ]
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "SELECT indexname FROM pg_indexes",
+   "text": "          indexname          \n-----------------------------\n orders_created_at_idx\n orders_pending_idx\n orders_product_id_idx\n products_category_price_idx\n products_name_trgm_idx\n(5 rows)"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "PgBouncer: SHOW POOLS (столбцы сокращены)",
+   "text": "database | cl_active | cl_waiting | sv_active | sv_idle | pool_mode\npgbouncer | 1 | 0 | 0 | 0 | statement\nshop | 4 | 0 | 0 | 1 | transaction\nshop_r1 | 3 | 0 | 0 | 1 | transaction\nshop_r2 | 3 | 0 | 0 | 1 | transaction"
+  },
+  {
+   "type": "p",
+   "text": "План запроса списка категории до и после индекса (`results/lab7_explain_*.txt`): параллельный Seq Scan с сортировкой заменён на Index Scan, время — с 17,2 до 0,25 мс. Сводка по всем запросам — в таблице 3."
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "EXPLAIN ANALYZE — до индексов",
+   "text": "----------------------------------------------------------------------------------------------\n Limit (actual time=13.051..17.046 rows=20 loops=1)\n   Buffers: shared hit=4049\n   ->  Gather Merge (actual time=13.050..17.043 rows=20 loops=1)\n         Workers Planned: 2\n         Workers Launched: 2\n         Buffers: shared hit=4049\n         ->  Sort (actual time=8.659..8.665 rows=16 loops=3)\n               Sort Key: price DESC\n               Sort Method: top-N heapsort  Memory: 29kB\n               Buffers: shared hit=4049\n               Worker 0:  Sort Method: top-N heapsort  Memory: 28kB\n               Worker 1:  Sort Method: top-N heapsort  Memory: 30kB\n               ->  Parallel Seq Scan on products (actual time=0.021..8.060 rows=1333 loops=3)\n                     Filter: (category_id = 7)\n                     Rows Removed by Filter: 65333\n                     Buffers: shared hit=3977\n Planning:\n   Buffers: shared hit=118"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "EXPLAIN ANALYZE — после индексов",
+   "text": "-----------------------------------------------------------------------------------------------------------\n Limit (actual time=0.076..0.213 rows=20 loops=1)\n   Buffers: shared hit=23 read=1\n   I/O Timings: shared read=0.015\n   ->  Index Scan using products_category_price_idx on products (actual time=0.075..0.208 rows=20 loops=1)\n         Index Cond: (category_id = 7)\n         Buffers: shared hit=23 read=1\n         I/O Timings: shared read=0.015\n Planning:\n   Buffers: shared hit=164\n Planning Time: 1.374 ms"
+  },
+  {
+   "type": "table",
+   "caption": "EXPLAIN ANALYZE до и после индексов",
+   "header": [
+    "Запрос",
+    "До",
+    "После",
+    "План"
+   ],
+   "rows": [
+    [
+     "Список категории",
+     "17,2 мс",
+     "0,25 мс",
+     "Index Scan (category_id, price DESC)"
+    ],
+    [
+     "Поиск без совпадений '%zzz%'",
+     "63,6 мс",
+     "0,56 мс",
+     "Bitmap Index Scan по GIN"
+    ],
+    [
+     "Поиск '%abc%'",
+     "8,1 мс",
+     "5,2 мс",
+     "Seq Scan — 20 совпадений находятся сразу"
+    ],
+    [
+     "Топ продаж за неделю",
+     "114,6 мс",
+     "42,5 мс",
+     "Index Only Scan с INCLUDE"
+    ]
+   ]
+  },
+  {
+   "type": "p",
+   "text": "Нагрузка на PostgreSQL в Grafana во время теста показана на рисунке 2."
+  },
+  {
+   "type": "figure",
+   "path": "../img/grafana-postgres.png",
+   "caption": "Панели PostgreSQL в Grafana (итоговый стенд)",
+   "width_cm": 16
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "docker compose run --rm k6 run /scripts/stress.js",
+   "text": "метрика                      avg       med     p(95)\nhttp_req_duration       253.52ms  203.42ms  569.94ms\nhttp_req_failed       0.00% 0 out of 46716\nhttp_reqs             46716 666.859865/s"
+  },
+  {
+   "type": "h1",
+   "text": "Результаты",
+   "numbered": true
+  },
+  {
+   "type": "table",
+   "caption": "Журнал замеров (k6/load.js)",
+   "header": [
+    "Лаб",
+    "RPS",
+    "p95, мс",
+    "Ошибки, %",
+    "p95 order, мс",
+    "Узкое место"
+   ],
+   "rows": [
+    [
+     "1",
+     "238,6",
+     "168,4",
+     "0,00",
+     "235,2",
+     "postgres (до 800% CPU)"
+    ],
+    [
+     "2",
+     "240,3",
+     "204,7",
+     "0,00",
+     "216,8",
+     "postgres (до 780% CPU)"
+    ],
+    [
+     "3",
+     "266,3",
+     "204,6",
+     "0,00",
+     "209,9",
+     "воркеры app (до 32% при лимите 50%)"
+    ],
+    [
+     "4",
+     "261,6",
+     "205,8",
+     "0,00",
+     "220,6",
+     "воркеры app (до 39% при лимите 50%)"
+    ],
+    [
+     "5",
+     "289,2",
+     "10,5",
+     "0,00",
+     "39,3",
+     "воркеры app (~33%), postgres ~32%"
+    ],
+    [
+     "6",
+     "287,9",
+     "12,7",
+     "0,00",
+     "24,9",
+     "воркеры app (~32%), primary ~5%"
+    ],
+    [
+     "7",
+     "288,6",
+     "12,1",
+     "0,00",
+     "28,0",
+     "воркеры app (~32%), БД почти не нагружены"
+    ]
+   ]
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab7_p95.png",
+   "caption": "p95 всех запросов и заказа по лабам 1–7",
+   "width_cm": 16
+  },
+  {
+   "type": "p",
+   "text": "По load.js показатели на уровне лабы 6 (таблица 4, рисунок 3) — тест упирается в собственный предел. Реальный запас показывает стресс-тест: 667 RPS без ошибок; PgBouncer обслужил 78 клиентов 34 серверными соединениями."
+  },
+  {
+   "type": "h1",
+   "text": "Контрольные вопросы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "**Зачем PgBouncer?** Каждое соединение с PostgreSQL — отдельный процесс (~5–10 МБ), их число ограничено `max_connections`. PgBouncer принимает тысячи дешёвых клиентских соединений и раздаёт им небольшой пул настоящих. Стресс 300 VU: 78 клиентов у PgBouncer → 34 соединения с базами."
+  },
+  {
+   "type": "p",
+   "text": "**Режимы пула?** session — соединение закреплено за клиентом до отключения; transaction — только на время транзакции (наш выбор, самый экономный); statement — на один запрос. В режиме transaction нельзя держать состояние сессии. Подготовленные выражения asyncpg PgBouncer 1.21+ переносит сам (`max_prepared_statements`)."
+  },
+  {
+   "type": "p",
+   "text": "**Что нашли через pg_stat_statements?** asyncpg после КАЖДОГО запроса слал `RESET ALL; pg_advisory_unlock_all(); CLOSE ALL` — столько же вызовов, сколько полезных запросов. Отключили (`reset=_no_reset` в `db.py`): состояния сессии у нас нет."
+  },
+  {
+   "type": "p",
+   "text": "**Что дали индексы?** См. таблицу в ЖУРНАЛ.md: список 17 → 0,25 мс, поиск без совпадений 64 → 0,56 мс (GIN по триграммам — B-tree не умеет `LIKE '%...%'`), топ продаж 115 → 42 мс (Index Only Scan благодаря `INCLUDE`)."
+  },
+  {
+   "type": "p",
+   "text": "**Что изменено в postgresql.conf?** `shared_buffers` ~25% памяти, `random_page_cost = 1.1` (SSD — индексы выгоднее), `jit = off` (на коротких запросах JIT только тратит время), `pg_stat_statements`, лог медленных запросов > 500 мс."
+  },
+  {
+   "type": "h1",
+   "text": "Выводы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Добавлен PgBouncer в режиме transaction, настроен `postgresql.conf`, созданы пять индексов. Через EXPLAIN ANALYZE подтверждено ускорение запросов до 100 раз, через pg_stat_statements найдены и убраны лишние служебные запросы asyncpg. Стресс-тест показал 667 RPS без ошибок; узкое место — CPU воркеров приложения."
+  }
+ ]
+}

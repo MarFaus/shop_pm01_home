@@ -1,0 +1,218 @@
+{
+ "toc": true,
+ "style": {
+  "font": "Times New Roman",
+  "size": 14,
+  "line": 1.5,
+  "margins_mm": [
+   30,
+   15,
+   20,
+   20
+  ]
+ },
+ "blocks": [
+  {
+   "type": "h1",
+   "text": "Цель работы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Установить инструменты для практикума ПМ01 «Высоконагруженное приложение магазина» и создать пустой проект `shop` под управлением git, на котором в лабораторных 1–8 строится «Мини-магазин»."
+  },
+  {
+   "type": "h1",
+   "text": "Анализ и постановка",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Требования к рабочему месту и проекту из задания сведены в таблицу 1."
+  },
+  {
+   "type": "table",
+   "caption": "Требования лабораторной работы",
+   "header": [
+    "Требование",
+    "Назначение"
+   ],
+   "rows": [
+    [
+     "Docker и Docker Compose v2",
+     "запуск всех сервисов магазина в контейнерах"
+    ],
+    [
+     "Python 3.12 или новее",
+     "локальный запуск и отладка приложения"
+    ],
+    [
+     "Git",
+     "история работы: коммит и тег после каждой лабы"
+    ],
+    [
+     "Папки app, db, k6",
+     "код приложения, скрипты БД, нагрузочные тесты"
+    ],
+    [
+     ".gitignore",
+     "не хранить в git виртуальное окружение и кэш Python"
+    ],
+    [
+     ".gitattributes",
+     "LF-переводы строк для .sh/.conf/.ini/.txt/.sql"
+    ]
+   ]
+  },
+  {
+   "type": "h1",
+   "text": "Выполнение работы",
+   "numbered": true
+  },
+  {
+   "type": "h2",
+   "text": "Проверка установленных программ"
+  },
+  {
+   "type": "p",
+   "text": "Версии инструментов проверены командами из задания. Вывод команд приведён ниже."
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "PowerShell: docker --version; docker compose version; python --version; git --version",
+   "text": "Docker version 29.9.3, build 5457199\nDocker Compose version v5.7.0\nPython 3.10.11\ngit version 2.56.0.windows.4"
+  },
+  {
+   "type": "p",
+   "text": "Проверка работы Docker командой `docker run --rm hello-world`:"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "PowerShell: docker run --rm hello-world",
+   "text": "\nHello from Docker!\nThis message shows that your installation appears to be working correctly."
+  },
+  {
+   "type": "p",
+   "text": "Docker Desktop работает поверх WSL 2 и видит 12 логических ядер и ~7,7 ГБ памяти. Файл `.wslconfig` с ограничением памяти не создавался: на компьютере достаточно ОЗУ, и все лимиты памяти задаются для каждого контейнера в `docker-compose.yml` (`mem_limit`)."
+  },
+  {
+   "type": "p",
+   "text": "Локально установлен Python 3.10.11 — ниже требуемого 3.12. Это не влияет на работу: приложение собирается и запускается только в контейнере на образе `python:3.14.0` (лаб 1), локальный интерпретатор используется лишь для вспомогательных скриптов."
+  },
+  {
+   "type": "h2",
+   "text": "Структура проекта"
+  },
+  {
+   "type": "p",
+   "text": "Создана папка проекта `D:\\Проекты\\PM01\\shop`, выполнен `git init`, созданы папки `app`, `db`, `k6`. Пустые папки git не хранит, поэтому в коммит лабы 0 вошли только служебные файлы. Файл `.gitignore` исключает из репозитория виртуальное окружение и кэш:"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": ".gitignore (тег lab-0)",
+   "text": ".venv/\n__pycache__/\n*.pyc"
+  },
+  {
+   "type": "p",
+   "text": "Файл `.gitattributes` заставляет git хранить скрипты и конфигурации с LF-переводами строк. Без него на Windows shell-скрипты внутри Linux-контейнеров падают с ошибкой `/bin/sh^M`:"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": ".gitattributes (тег lab-0)",
+   "text": "*.sh   text eol=lf\n*.conf text eol=lf\n*.ini  text eol=lf\n*.txt  text eol=lf\n*.sql  text eol=lf"
+  },
+  {
+   "type": "h2",
+   "text": "Коммит и тег"
+  },
+  {
+   "type": "p",
+   "text": "Работа зафиксирована коммитом «Лаб 0: структура проекта» с тегом `lab-0`. Далее каждая лабораторная завершается своим коммитом и тегом `lab-N` (листинг ниже — итоговая история всех лаб)."
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "git log --oneline --decorate --reverse",
+   "text": "a3ffbd8 (tag: lab-0) Лаб 0: структура проекта\nf8b3440 (tag: lab-1) Лаб 1: FastAPI + PostgreSQL в Docker\nf1ac7d8 (tag: lab-2) Лаб 2: Nginx + 3 воркера\n65b23a0 (tag: lab-3) Лаб 3: кэш Redis (cache-aside, TTL, инвалидация)\n22a16ae (tag: lab-4) Лаб 4: Redis Cluster из 6 узлов, failover; nginx: zone + resolve\n25bc70f (tag: lab-5) Лаб 5: RabbitMQ, асинхронная обработка заказов (consumer)\ne4c463d (tag: lab-6) Лаб 6: реплики PostgreSQL, чтение с реплик, запись в primary\nf53305f (tag: lab-7) Лаб 7: PgBouncer, postgresql.conf, индексы, EXPLAIN ANALYZE, pg_stat_statements\na7c70ab (tag: lab-8) Лаб 8: edge-кэш (CDN), Prometheus, Grafana, экспортеры, метрики приложения"
+  },
+  {
+   "type": "h1",
+   "text": "Тестирование",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Проверки из раздела «Проверка» задания приведены в таблице 2."
+  },
+  {
+   "type": "table",
+   "caption": "Тест-кейсы",
+   "header": [
+    "ID",
+    "Сценарий",
+    "Ожидается",
+    "Фактически",
+    "Статус"
+   ],
+   "rows": [
+    [
+     "T0.1",
+     "docker run --rm hello-world",
+     "«Hello from Docker!»",
+     "«Hello from Docker!»",
+     "пройден"
+    ],
+    [
+     "T0.2",
+     "docker compose version",
+     "Compose v2+",
+     "v5.7.0",
+     "пройден"
+    ],
+    [
+     "T0.3",
+     "python --version",
+     "3.12 или новее",
+     "3.10.11 (в контейнере 3.14.0)",
+     "частично"
+    ],
+    [
+     "T0.4",
+     "В папке shop есть .git, .gitignore, .gitattributes",
+     "есть",
+     "есть",
+     "пройден"
+    ],
+    [
+     "T0.5",
+     "git tag",
+     "lab-0",
+     "lab-0 … lab-8",
+     "пройден"
+    ]
+   ]
+  },
+  {
+   "type": "h1",
+   "text": "Результаты",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Рабочее место подготовлено: Docker и Compose работают, создан репозиторий проекта со служебными файлами git. Репозиторий опубликован на GitHub (MarFaus/shop_pm01_home)."
+  },
+  {
+   "type": "h1",
+   "text": "Выводы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Установлены и проверены Docker, Docker Compose, Git; создан проект с `.gitignore` и `.gitattributes`, сделан коммит с тегом `lab-0`. Изучено, зачем фиксировать переводы строк для файлов, которые выполняются внутри Linux-контейнеров. Ограничение: локальный Python 3.10 ниже требуемого, но приложение работает в контейнере с Python 3.14, поэтому на ход практикума это не влияет."
+  }
+ ]
+}

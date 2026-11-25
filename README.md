@@ -390,6 +390,8 @@ xychart-beta
 
 Полный журнал с пояснениями — [ЖУРНАЛ.md](ЖУРНАЛ.md), отчёты k6 — в папке [`results/`](results/).
 
+Отчёты по каждой лабе в Word (цель, код, тесты, замеры, ответы на вопросы) — в папке [`docs/report/`](docs/report/).
+
 ```powershell
 docker compose run --rm k6 run /scripts/load.js     # основной замер (70 с)
 docker compose run --rm k6 run /scripts/orders.js   # всплеск заказов (смотреть очередь в RabbitMQ)
@@ -458,6 +460,8 @@ shop/
 ├── monitoring/                 prometheus.yml, Grafana: источник + дашборд
 ├── k6/                         load.js, orders.js, stress.js
 ├── results/                    отчёты k6, docker stats, планы запросов
+├── docs/report/                отчёты по лабам 0–8 (.docx)
+├── scripts/smoke.sh            сквозная проверка стенда (26 проверок)
 ├── ЖУРНАЛ.md                   журнал замеров
 └── ОТВЕТЫ.md                   ответы на контрольные вопросы
 ```
@@ -495,6 +499,6 @@ docker compose exec -e PGPASSWORD=shop pgbouncer psql -h 127.0.0.1 -p 6432 -U sh
 
 <div align="center">
 
-📊 [Журнал замеров](ЖУРНАЛ.md) · ❓ [Ответы на контрольные вопросы](ОТВЕТЫ.md) · 📁 [Отчёты k6](results/)
+📊 [Журнал замеров](ЖУРНАЛ.md) · ❓ [Ответы на контрольные вопросы](ОТВЕТЫ.md) · 📁 [Отчёты k6](results/) · 📝 [Отчёты по лабам](docs/report/)
 
 </div>

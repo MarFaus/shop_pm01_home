@@ -1,0 +1,283 @@
+{
+ "toc": true,
+ "style": {
+  "font": "Times New Roman",
+  "size": 14,
+  "line": 1.5,
+  "margins_mm": [
+   30,
+   15,
+   20,
+   20
+  ]
+ },
+ "blocks": [
+  {
+   "type": "h1",
+   "text": "Цель работы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Снять нагрузку с PostgreSQL кэшированием в Redis по схеме cache-aside: повторные чтения каталога и статистики отдавать из памяти, а при изменении данных удалять устаревшие ключи."
+  },
+  {
+   "type": "h1",
+   "text": "Анализ и постановка",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "80% просмотров приходится на 1000 «горячих» товаров, поэтому кэш карточек эффективен. Для каждого вида данных выбран свой TTL (таблица 1)."
+  },
+  {
+   "type": "table",
+   "caption": "Что и как кэшируется",
+   "header": [
+    "Ключ",
+    "Данные",
+    "TTL",
+    "Инвалидация"
+   ],
+   "rows": [
+    [
+     "product:{id}",
+     "карточка товара",
+     "60 с",
+     "удаление при заказе"
+    ],
+    [
+     "list:{cat}:{limit}:{offset}",
+     "список категории",
+     "30 с",
+     "по TTL"
+    ],
+    [
+     "stats:top",
+     "топ продаж за неделю",
+     "30 с",
+     "по TTL"
+    ],
+    [
+     "search:{q}:{limit}",
+     "результаты поиска",
+     "60 с",
+     "по TTL"
+    ]
+   ]
+  },
+  {
+   "type": "p",
+   "text": "Кэш — ускоритель, а не хранилище: при недоступности Redis приложение работает напрямую с БД. Поэтому в Redis отключено сохранение на диск, задан `maxmemory 64mb` и политика `allkeys-lru`."
+  },
+  {
+   "type": "h1",
+   "text": "Выполнение работы",
+   "numbered": true
+  },
+  {
+   "type": "h2",
+   "text": "Схема стенда"
+  },
+  {
+   "type": "p",
+   "text": "Добавлен сервис `redis`; воркеры обращаются к нему перед запросом в БД (рисунок 1, упрощённо: стрелка к кэшу показана от одного воркера)."
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab3_stand.png",
+   "caption": "Схема стенда лабы 3",
+   "width_cm": 16
+  },
+  {
+   "type": "h2",
+   "text": "Модуль кэша"
+  },
+  {
+   "type": "p",
+   "text": "Все ошибки Redis перехватываются: при сбое `get` возвращает `None`, и запрос идёт в БД. Тип `Decimal` и даты из asyncpg сериализуются в JSON отдельной функцией:"
+  },
+  {
+   "type": "code",
+   "lang": "python",
+   "path": "app/cache.py (тег lab-3)",
+   "text": "def _default(value):\n    # asyncpg возвращает Decimal и datetime — JSON их не знает\n    if isinstance(value, decimal.Decimal):\n        return float(value)\n    if isinstance(value, (datetime.datetime, datetime.date)):\n        return value.isoformat()\n    raise TypeError(f\"не сериализуется: {type(value)}\")\n\n\nasync def init() -> None:\n    global _client\n    _client = redis.from_url(REDIS_URL, decode_responses=True,\n                             socket_timeout=0.5, socket_connect_timeout=0.5)\n\n\nasync def close() -> None:\n    if _client is not None:\n        await _client.aclose()\n\n\nasync def get(key: str):\n    \"\"\"Значение из кэша или None (нет ключа или Redis недоступен).\"\"\"\n    try:\n        raw = await _client.get(key)\n    except Exception as exc:  # noqa: BLE001\n        log.warning(\"redis get %s: %s\", key, exc)\n        return None\n    return None if raw is None else json.loads(raw)\n\n\nasync def set(key: str, value, ttl: int | None = None) -> None:\n    try:\n        await _client.set(key, json.dumps(value, default=_default, ensure_ascii=False),\n                          ex=ttl or CACHE_TTL)\n    except Exception as exc:  # noqa: BLE001\n        log.warning(\"redis set %s: %s\", key, exc)\n\n\nasync def delete(key: str) -> None:\n    try:\n        await _client.delete(key)\n    except Exception as exc:  # noqa: BLE001\n        log.warning(\"redis delete %s: %s\", key, exc)\n\n\nasync def ping() -> bool:\n    try:\n        return bool(await _client.ping())\n    except Exception:  # noqa: BLE001\n        return False"
+  },
+  {
+   "type": "h2",
+   "text": "Cache-aside в обработчиках"
+  },
+  {
+   "type": "p",
+   "text": "Карточка товара сначала ищется в кэше; при промахе читается из БД и кладётся в кэш на 60 с. Заголовок `X-Cache: HIT/MISS` показывает источник ответа:"
+  },
+  {
+   "type": "code",
+   "lang": "python",
+   "path": "app/main.py (тег lab-3)",
+   "text": "@app.get(\"/products/{product_id}\")\nasync def get_product(product_id: int, response: Response):\n    key = f\"product:{product_id}\"\n    if (cached := await cache.get(key)) is not None:\n        response.headers[\"X-Cache\"] = \"HIT\"\n        return cached\n    # $1 — параметр запроса. Никогда не вставляйте значения в SQL\n    # через f-строки — это SQL-инъекция.\n    row = await app.state.db.fetchrow(\n        \"\"\"SELECT p.id, p.name, p.description, p.price, p.stock, c.name AS category\n           FROM products p JOIN categories c ON c.id = p.category_id\n           WHERE p.id = $1\"\"\",\n        product_id,\n    )\n    if row is None:\n        raise HTTPException(404, \"Товар не найден\")\n    result = dict(row)\n    await cache.set(key, result, ttl=60)\n    response.headers[\"X-Cache\"] = \"MISS\"\n    return result"
+  },
+  {
+   "type": "p",
+   "text": "После заказа остаток товара изменился, поэтому ключ карточки удаляется (инвалидация):"
+  },
+  {
+   "type": "code",
+   "lang": "python",
+   "path": "app/main.py (тег lab-3)",
+   "text": "    # Инвалидация: остаток товара изменился — старая карточка в кэше неверна\n    await cache.delete(f\"product:{order.product_id}\")\n    return dict(row)"
+  },
+  {
+   "type": "h1",
+   "text": "Тестирование",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Функциональные проверки выполнены скриптом `scripts/smoke.sh` на итоговом стенде (после лаб 8; `docker compose up -d --build`), последний прогон — 25.11.2026: пройдено 26 из 26. Нагрузочные замеры k6 сняты в момент сдачи каждой лабы и сохранены в `results/`. Результаты по лабе 3 — в таблице 2."
+  },
+  {
+   "type": "table",
+   "caption": "Тест-кейсы",
+   "header": [
+    "ID",
+    "Сценарий",
+    "Ожидается",
+    "Фактически",
+    "Статус"
+   ],
+   "rows": [
+    [
+     "T3.1",
+     "Повторный GET /products/77 — заголовок X-Cache",
+     "HIT",
+     "HIT",
+     "пройден"
+    ],
+    [
+     "T3.2",
+     "GET /products/{id} нового товара",
+     "X-Cache: MISS",
+     "MISS",
+     "пройден"
+    ],
+    [
+     "T3.k6",
+     "Нагрузочный тест `k6/load.js` (до 50 VU, 70 с)",
+     "ошибок < 1%, p95 < 500 мс",
+     "ошибок 0,00%, p95 204,6 мс, 266,3 RPS",
+     "пройден"
+    ]
+   ]
+  },
+  {
+   "type": "p",
+   "text": "Первый и повторный запрос карточки (запрос к `lb` напрямую, порт 8081, минуя edge-кэш лабы 8):"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "curl -si localhost:8081/products/1234 (дважды)",
+   "text": "HTTP/1.1 200 OK\nx-cache: MISS\nX-Upstream: 172.18.0.21:8000\n\nHTTP/1.1 200 OK\nx-cache: HIT\nX-Upstream: 172.18.0.22:8000"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "docker compose run --rm k6 run /scripts/load.js",
+   "text": "метрика                      avg       med     p(95)\nhttp_req_duration        12.56ms    1.85ms  204.56ms\nname:list                 2.29ms    1.72ms    4.12ms\nname:order              206.68ms  206.23ms  209.89ms\nname:product              2.01ms    1.82ms    3.64ms\nname:search               4.33ms    4.15ms    7.31ms\nname:top                  1.88ms     1.5ms    2.82ms\nhttp_req_failed       0.00% 0 out of 18656\nhttp_reqs             18656 266.297788/s"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "docker stats",
+   "text": "shop-app3-1 22.99% 60.97MiB / 200MiB\nshop-app2-1 0.09% 48.51MiB / 200MiB\nshop-app1-1 21.91% 52.8MiB / 200MiB\nshop-redis-1 2.50% 7.441MiB / 128MiB\nshop-lb-1 7.24% 11.94MiB / 64MiB\nshop-postgres-1 30.13% 127.1MiB / 512MiB"
+  },
+  {
+   "type": "h1",
+   "text": "Результаты",
+   "numbered": true
+  },
+  {
+   "type": "table",
+   "caption": "Журнал замеров (k6/load.js)",
+   "header": [
+    "Лаб",
+    "RPS",
+    "p95, мс",
+    "Ошибки, %",
+    "p95 order, мс",
+    "Узкое место"
+   ],
+   "rows": [
+    [
+     "1",
+     "238,6",
+     "168,4",
+     "0,00",
+     "235,2",
+     "postgres (до 800% CPU)"
+    ],
+    [
+     "2",
+     "240,3",
+     "204,7",
+     "0,00",
+     "216,8",
+     "postgres (до 780% CPU)"
+    ],
+    [
+     "3",
+     "266,3",
+     "204,6",
+     "0,00",
+     "209,9",
+     "воркеры app (до 32% при лимите 50%)"
+    ]
+   ]
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab3_p95.png",
+   "caption": "p95 всех запросов и заказа по лабам 1–3",
+   "width_cm": 16
+  },
+  {
+   "type": "p",
+   "text": "Как видно из таблицы 3 и рисунка 2, RPS вырос до 266,3, а CPU PostgreSQL упал с ~780% до 7–30%. p95 остался около 205 мс: его держит заказ, синхронно ожидающий «шлюз» 0,2 с — это решается в лабе 5. Узкое место сместилось на воркеры приложения."
+  },
+  {
+   "type": "h1",
+   "text": "Контрольные вопросы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "**Что такое cache-aside?** Приложение само управляет кэшем: ищет ключ в Redis → если нет (MISS), читает из БД и кладёт в Redis с TTL → при изменении данных удаляет ключ. Код — `app/cache.py` и обработчики в `app/main.py`. Заголовок ответа `X-Cache: HIT/MISS` показывает, откуда ответ."
+  },
+  {
+   "type": "p",
+   "text": "**Зачем TTL и как выбран?** TTL ограничивает, насколько устаревшими могут быть данные, и не даёт кэшу хранить ненужное вечно. Карточка товара — 60 с (плюс удаление при заказе), список категории и топ продаж — 30 с (отставание на полминуты допустимо), поиск — 60 с."
+  },
+  {
+   "type": "p",
+   "text": "**Что такое инвалидация?** Удаление ключа, когда данные в БД изменились. После заказа удаляем `product:{id}`: остаток изменился, следующий запрос возьмёт свежие данные из БД. Списки не инвалидируем, их «лечит» короткий TTL."
+  },
+  {
+   "type": "p",
+   "text": "**Что будет, если Redis упадёт?** Магазин продолжит работать, только медленнее: все ошибки Redis перехватываются, запрос идёт в БД. Кэш — ускоритель, а не хранилище. Поэтому в Redis отключено сохранение на диск, а `maxmemory` + `allkeys-lru` вытесняет редко читаемые ключи."
+  },
+  {
+   "type": "p",
+   "text": "**Почему вырос RPS и упал CPU postgres?** 80% просмотров приходится на 1000 «горячих» товаров, они почти всегда в кэше. CPU postgres упал с ~780% до 30%."
+  },
+  {
+   "type": "h1",
+   "text": "Выводы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Реализован кэш cache-aside в Redis с TTL по видам данных и инвалидацией карточки при заказе. Проверено: повторный запрос отдаётся из кэша (HIT), после заказа — снова из БД (MISS). Нагрузка на PostgreSQL снизилась более чем в 20 раз, узкое место переместилось на воркеры. Ограничение: один экземпляр Redis — единая точка отказа кэша (решается в лабе 4)."
+  }
+ ]
+}

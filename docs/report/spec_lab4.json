@@ -1,0 +1,296 @@
+{
+ "toc": true,
+ "style": {
+  "font": "Times New Roman",
+  "size": 14,
+  "line": 1.5,
+  "margins_mm": [
+   30,
+   15,
+   20,
+   20
+  ]
+ },
+ "blocks": [
+  {
+   "type": "h1",
+   "text": "Цель работы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Заменить одиночный Redis кластером из шести узлов (3 мастера + 3 реплики), чтобы кэш делился между узлами и переживал падение мастера без ошибок для пользователей."
+  },
+  {
+   "type": "h1",
+   "text": "Анализ и постановка",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Ключи распределяются по 16 384 слотам: слот = CRC16(ключ) mod 16384, каждый мастер отвечает за треть слотов. Решения лабы — в таблице 1."
+  },
+  {
+   "type": "table",
+   "caption": "Решения по Redis Cluster",
+   "header": [
+    "Задача",
+    "Решение"
+   ],
+   "rows": [
+    [
+     "Шардирование",
+     "3 мастера, слоты 0–5460, 5461–10922, 10923–16383"
+    ],
+    [
+     "Отказоустойчивость",
+     "по реплике на мастер, cluster-node-timeout 5000"
+    ],
+    [
+     "Смена IP контейнеров",
+     "cluster-preferred-endpoint-type hostname"
+    ],
+    [
+     "Сборка кластера",
+     "одноразовый контейнер redis-init, идемпотентный скрипт"
+    ],
+    [
+     "Задержки при failover",
+     "потолок 0,3 с на любую операцию с кэшем"
+    ]
+   ]
+  },
+  {
+   "type": "h1",
+   "text": "Выполнение работы",
+   "numbered": true
+  },
+  {
+   "type": "h2",
+   "text": "Схема стенда"
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab4_stand.png",
+   "caption": "Схема стенда лабы 4",
+   "width_cm": 16
+  },
+  {
+   "type": "p",
+   "text": "На рисунке 1 одиночный Redis заменён кластером `redis1`–`redis6`."
+  },
+  {
+   "type": "h2",
+   "text": "Конфигурация узла"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "redis/redis.conf (тег lab-4)",
+   "text": "# Узел Redis Cluster. Файл общий для всех шести узлов.\nport 6379\nprotected-mode no\n\n# Режим кластера: 16384 слота делятся между мастерами\ncluster-enabled yes\n# Сюда узел сам записывает состав кластера (в контейнере, не в git)\ncluster-config-file nodes.conf\n# Мастер не отвечает 5 секунд — считается упавшим, его место занимает реплика\ncluster-node-timeout 5000\n# Клиентам отдаём имена узлов (redis1...), а не IP: IP в Docker меняются\ncluster-preferred-endpoint-type hostname\n\n# Это кэш: на диск не сохраняем\nsave \"\"\nappendonly no\n\n# Каждому узлу — 48 МБ, при нехватке вытесняем давно не читанные ключи\nmaxmemory 48mb\nmaxmemory-policy allkeys-lru"
+  },
+  {
+   "type": "h2",
+   "text": "Сборка кластера"
+  },
+  {
+   "type": "p",
+   "text": "Скрипт выполняется контейнером `redis-init` после старта узлов. Повторный запуск не ломает собранный кластер — скрипт сразу завершается:"
+  },
+  {
+   "type": "code",
+   "lang": "bash",
+   "path": "redis/cluster-init.sh (тег lab-4)",
+   "text": "#!/bin/sh\n# Собирает кластер из 6 узлов: 3 мастера + 3 реплики (по одной на мастер).\n# Запускается одноразовым контейнером redis-init после старта узлов.\nset -e\n\nif redis-cli -h redis1 cluster info | grep -q 'cluster_state:ok'; then\n  echo \"Кластер уже собран\"\n  exit 0\nfi\n\n# redis-cli --cluster create принимает только IP-адреса — узнаём их по именам\nADDRS=\"\"\nfor n in 1 2 3 4 5 6; do\n  ip=$(getent hosts \"redis$n\" | awk '{print $1}')\n  ADDRS=\"$ADDRS $ip:6379\"\ndone\necho \"Узлы:$ADDRS\"\n\n# --cluster-replicas 1: на каждый мастер по одной реплике\n# --cluster-yes: не спрашивать подтверждение\nredis-cli --cluster create $ADDRS --cluster-replicas 1 --cluster-yes\n\n# Ждём, пока все узлы договорятся о раскладке слотов\nfor i in $(seq 1 30); do\n  if redis-cli -h redis1 cluster info | grep -q 'cluster_state:ok'; then\n    echo \"Кластер готов\"\n    redis-cli -h redis1 cluster nodes\n    exit 0\n  fi\n  sleep 1\ndone\necho \"Кластер не собрался\" >&2\nexit 1"
+  },
+  {
+   "type": "h2",
+   "text": "Клиент кластера в приложении"
+  },
+  {
+   "type": "p",
+   "text": "При заданной переменной `REDIS_CLUSTER_NODES` используется `RedisCluster`: клиент сам вычисляет слот ключа и после failover обновляет карту узлов. Каждая операция ограничена 0,3 с: без этого во время переключения отдельные запросы ждали до 10 с."
+  },
+  {
+   "type": "code",
+   "lang": "python",
+   "path": "app/cache.py",
+   "text": "REDIS_URL = os.getenv(\"REDIS_URL\", \"redis://localhost:6379/0\")\n# Если задан список узлов — работаем с Redis Cluster (лаб 4), иначе с одним Redis\nREDIS_CLUSTER_NODES = os.getenv(\"REDIS_CLUSTER_NODES\", \"\")\nCACHE_TTL = int(os.getenv(\"CACHE_TTL\", \"60\"))  # время жизни по умолчанию, секунд\n# Потолок на любую операцию с кэшем. Во время failover клиент кластера\n# переподключается и ретраит секундами — пользователь ждать не должен.\nCACHE_OP_TIMEOUT = float(os.getenv(\"CACHE_OP_TIMEOUT\", \"0.3\"))"
+  },
+  {
+   "type": "code",
+   "lang": "python",
+   "path": "app/cache.py",
+   "text": "async def init() -> None:\n    global _client\n    # Короткие таймауты: лучше сходить в БД, чем ждать зависший кэш\n    opts = dict(decode_responses=True, socket_timeout=0.5, socket_connect_timeout=0.5)\n    if REDIS_CLUSTER_NODES:\n        # Клиент кластера сам считает слот ключа (CRC16(key) % 16384)\n        # и идёт на нужный мастер; после failover обновляет карту узлов.\n        nodes = [ClusterNode(*addr.split(\":\")) for addr in REDIS_CLUSTER_NODES.split(\",\")]\n        _client = RedisCluster(startup_nodes=nodes, **opts)\n    else:\n        _client = redis.from_url(REDIS_URL, **opts)\n\n\nasync def close() -> None:\n    if _client is not None:\n        await _client.aclose()\n\n\nasync def get(key: str):\n    \"\"\"Значение из кэша или None (нет ключа или Redis недоступен).\"\"\"\n    try:\n        raw = await asyncio.wait_for(_client.get(key), CACHE_OP_TIMEOUT)\n    except Exception as exc:  # noqa: BLE001\n        log.warning(\"redis get %s: %r\", key, exc)\n        CACHE_REQUESTS.labels(\"error\").inc()\n        return None\n    if raw is None:\n        CACHE_REQUESTS.labels(\"miss\").inc()\n        return None\n    CACHE_REQUESTS.labels(\"hit\").inc()\n    return json.loads(raw)"
+  },
+  {
+   "type": "h1",
+   "text": "Тестирование",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Функциональные проверки выполнены скриптом `scripts/smoke.sh` на итоговом стенде (после лаб 8; `docker compose up -d --build`), последний прогон — 25.11.2026: пройдено 26 из 26. Нагрузочные замеры k6 сняты в момент сдачи каждой лабы и сохранены в `results/`. Результаты по лабе 4 — в таблице 2."
+  },
+  {
+   "type": "table",
+   "caption": "Тест-кейсы",
+   "header": [
+    "ID",
+    "Сценарий",
+    "Ожидается",
+    "Фактически",
+    "Статус"
+   ],
+   "rows": [
+    [
+     "T4.1",
+     "cluster info — состояние кластера",
+     "cluster_state:ok",
+     "cluster_state:ok",
+     "пройден"
+    ],
+    [
+     "T4.2",
+     "cluster nodes — число мастеров",
+     "3",
+     "3",
+     "пройден"
+    ],
+    [
+     "T4.f",
+     "docker compose stop redis5 (мастер) под нагрузкой",
+     "0 ошибок, реплика стала мастером",
+     "0 ошибок из 17 073, max 0,68 с",
+     "пройден"
+    ],
+    [
+     "T4.k6",
+     "Нагрузочный тест `k6/load.js` (до 50 VU, 70 с)",
+     "ошибок < 1%, p95 < 500 мс",
+     "ошибок 0,00%, p95 205,8 мс, 261,6 RPS",
+     "пройден"
+    ]
+   ]
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "redis-cli cluster info",
+   "text": "cluster_state:ok\ncluster_slots_assigned:16384\ncluster_slots_ok:16384\ncluster_slots_pfail:0\ncluster_slots_fail:0\ncluster_known_nodes:6\ncluster_size:3"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "redis-cli cluster nodes (адрес, роль, слоты)",
+   "text": "172.18.0.10:6379,redis2 master 5461-10922\n172.18.0.3:6379,redis1 myself,master 0-5460\n172.18.0.6:6379,redis3 master 10923-16383\n172.18.0.7:6379,redis4 slave \n172.18.0.8:6379,redis5 slave \n172.18.0.9:6379,redis6 slave"
+  },
+  {
+   "type": "p",
+   "text": "Опыт с отказом (`results/lab4_failover_k6.txt`): через 20 с остановлен мастер `redis5`, через 20 с запущен снова. Его реплика стала мастером, вернувшийся узел встал репликой; ошибок нет:"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "k6 во время остановки мастера Redis",
+   "text": "метрика                      avg       med     p(95)\nhttp_req_duration        22.91ms    2.28ms  206.31ms\nname:list                14.08ms    2.14ms   13.94ms\nname:order               216.1ms  206.99ms  220.84ms\nname:product             13.62ms    2.24ms       5ms\nname:search              14.82ms    4.96ms    9.71ms\nname:top                   4.6ms    1.84ms    3.59ms\nhttp_req_failed       0.00% 0 out of 17073\nhttp_reqs             17073 243.551765/s"
+  },
+  {
+   "type": "code",
+   "lang": "text",
+   "path": "docker compose run --rm k6 run /scripts/load.js",
+   "text": "метрика                      avg       med     p(95)\nhttp_req_duration        14.46ms    2.66ms  205.78ms\nname:list                 3.66ms    2.56ms   10.19ms\nname:order              211.17ms  208.27ms  220.56ms\nname:product              3.33ms    2.59ms    6.27ms\nname:search                  7ms    6.05ms   14.14ms\nname:top                  3.24ms    2.21ms    5.15ms\nhttp_req_failed       0.00% 0 out of 18316\nhttp_reqs             18316 261.55377/s"
+  },
+  {
+   "type": "h1",
+   "text": "Результаты",
+   "numbered": true
+  },
+  {
+   "type": "table",
+   "caption": "Журнал замеров (k6/load.js)",
+   "header": [
+    "Лаб",
+    "RPS",
+    "p95, мс",
+    "Ошибки, %",
+    "p95 order, мс",
+    "Узкое место"
+   ],
+   "rows": [
+    [
+     "1",
+     "238,6",
+     "168,4",
+     "0,00",
+     "235,2",
+     "postgres (до 800% CPU)"
+    ],
+    [
+     "2",
+     "240,3",
+     "204,7",
+     "0,00",
+     "216,8",
+     "postgres (до 780% CPU)"
+    ],
+    [
+     "3",
+     "266,3",
+     "204,6",
+     "0,00",
+     "209,9",
+     "воркеры app (до 32% при лимите 50%)"
+    ],
+    [
+     "4",
+     "261,6",
+     "205,8",
+     "0,00",
+     "220,6",
+     "воркеры app (до 39% при лимите 50%)"
+    ]
+   ]
+  },
+  {
+   "type": "figure",
+   "path": "shots/lab4_p95.png",
+   "caption": "p95 всех запросов и заказа по лабам 1–4",
+   "width_cm": 16
+  },
+  {
+   "type": "p",
+   "text": "Скорость осталась на уровне лабы 3 (таблица 3, рисунок 2), зато кэш больше не единая точка отказа: падение мастера под нагрузкой прошло без ошибок."
+  },
+  {
+   "type": "h1",
+   "text": "Контрольные вопросы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "**Как кластер делит данные?** Пространство ключей — 16 384 слота, слот = CRC16(ключ) mod 16384. Каждый из 3 мастеров отвечает за треть слотов. Клиент (`RedisCluster` в `cache.py`) сам вычисляет слот и идёт на нужный узел. Проверка: `docker compose exec redis1 redis-cli cluster nodes`, ключи разошлись по мастерам примерно поровну."
+  },
+  {
+   "type": "p",
+   "text": "**Зачем 6 узлов?** 3 мастера (шардирование — больше памяти и пропускной способности) + по реплике на каждый (отказоустойчивость). 3 — минимум мастеров для голосования при failover."
+  },
+  {
+   "type": "p",
+   "text": "**Что происходит при падении мастера?** Через `cluster-node-timeout` (5 с) остальные мастера признают его упавшим, и его реплика становится мастером. Опыт: под нагрузкой остановили redis5 — 0 ошибок, вернувшийся узел встал репликой. Чтобы во время переключения пользователь не ждал, на операции кэша стоит потолок 0,3 с: без него отдельные запросы висели до 10 с."
+  },
+  {
+   "type": "p",
+   "text": "**Почему в конфиге `cluster-preferred-endpoint-type hostname`?** IP контейнеров меняются при пересоздании, а имена (redis1…) постоянные."
+  },
+  {
+   "type": "h1",
+   "text": "Выводы",
+   "numbered": true
+  },
+  {
+   "type": "p",
+   "text": "Развёрнут Redis Cluster из шести узлов, приложение переведено на клиент кластера. Проверено распределение слотов по трём мастерам и автоматический failover под нагрузкой без ошибок. Подобран потолок времени операции кэша, иначе ретраи клиента превращали отказ узла в задержки до 10 с."
+  }
+ ]
+}
