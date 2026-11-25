@@ -9,6 +9,8 @@ x-app: &app
     # Адреса для первого подключения; остальную карту кластера клиент узнает сам
     REDIS_CLUSTER_NODES: redis1:6379,redis2:6379,redis3:6379,redis4:6379,redis5:6379,redis6:6379
     RABBITMQ_URL: amqp://shop:shop@rabbitmq:5672/
+    # Чтение каталога — с реплик (по очереди)
+    DATABASE_REPLICA_URLS: postgresql://shop:shop@postgres-r1:5432/shop,postgresql://shop:shop@postgres-r2:5432/shop
   depends_on:
     postgres:
       condition: service_healthy   # стартовать, когда база готова
@@ -16,9 +18,35 @@ x-app: &app
       condition: service_completed_successfully   # кластер собран
     rabbitmq:
       condition: service_healthy
+    postgres-r1:
+      condition: service_started   # без реплик приложение работает (читает с primary)
+    postgres-r2:
+      condition: service_started
   mem_limit: 200m
   cpus: 0.5                        # имитируем слабый сервер — пол-ядра
   restart: on-failure
+
+# Общий шаблон реплики PostgreSQL
+x-replica: &replica
+  image: postgres:16-alpine
+  entrypoint: ["sh", "/replica-entrypoint.sh"]
+  command: ["-c", "hot_standby=on"]      # на реплике разрешены SELECT
+  environment:
+    PRIMARY_HOST: postgres
+    POSTGRES_USER: shop
+    POSTGRES_DB: shop
+    REPLICATION_PASSWORD: replicator
+  depends_on:
+    postgres:
+      condition: service_healthy
+  shm_size: 256m
+  mem_limit: 384m
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U shop -d shop"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
+    start_period: 30s
 
 # Общий шаблон узла Redis Cluster
 x-redis: &redis
@@ -33,12 +61,16 @@ x-redis: &redis
     retries: 10
 
 services:
+  # Primary: принимает запись и отдаёт поток WAL репликам
   postgres:
     image: postgres:16-alpine
+    # wal_keep_size — сколько WAL хранить для отставшей реплики
+    command: ["postgres", "-c", "wal_keep_size=256MB"]
     environment:
       POSTGRES_USER: shop
       POSTGRES_PASSWORD: shop
       POSTGRES_DB: shop
+      REPLICATION_PASSWORD: replicator    # для db/init/02_replication.sh
     ports:
       - "5432:5432"          # чтобы приложение на компьютере могло подключиться
     volumes:
@@ -53,6 +85,18 @@ services:
       timeout: 3s
       retries: 30
       start_period: 30s
+
+  # Реплики: копия primary только для чтения
+  postgres-r1:
+    <<: *replica
+    volumes:
+      - pgdata_r1:/var/lib/postgresql/data
+      - ./db/replica-entrypoint.sh:/replica-entrypoint.sh:ro
+  postgres-r2:
+    <<: *replica
+    volumes:
+      - pgdata_r2:/var/lib/postgresql/data
+      - ./db/replica-entrypoint.sh:/replica-entrypoint.sh:ro
 
   # Redis Cluster: 6 узлов (3 мастера + 3 реплики). Наружу порты не открываем.
   redis1:
@@ -153,4 +197,6 @@ services:
 
 volumes:
   pgdata:
+  pgdata_r1:
+  pgdata_r2:
   rabbitdata:

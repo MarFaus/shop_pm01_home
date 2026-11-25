@@ -1,36 +1,33 @@
-"""Мини-магазин: FastAPI + PostgreSQL + кэш Redis + очередь RabbitMQ."""
+"""Мини-магазин: FastAPI + PostgreSQL (primary + реплики) + Redis Cluster + RabbitMQ."""
 import logging
 import os
 import socket
 from contextlib import asynccontextmanager
 
-import asyncpg
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 import cache
 import mq
+from db import db
 
 log = logging.getLogger("shop")
 
-# --- Настройки из переменных окружения ---
-# По умолчанию — база на этом компьютере (для запуска без Docker)
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://shop:shop@localhost:5432/shop")
-DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
+# --- Настройки из переменных окружения (адреса БД — в db.py) ---
 INSTANCE = os.getenv("INSTANCE_NAME") or socket.gethostname()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Выполняется при старте приложения: создаём пул соединений
-    app.state.db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=DB_POOL_MAX)
+    # Выполняется при старте приложения: создаём пулы соединений
+    await db.connect()
     await cache.init()
     await mq.init()
     yield
     # При остановке — закрываем соединения
     await mq.close()
     await cache.close()
-    await app.state.db.close()
+    await db.close()
 
 
 app = FastAPI(title="Мини-магазин", lifespan=lifespan)
@@ -56,8 +53,9 @@ async def index():
 
 @app.get("/health")
 async def health():
-    await app.state.db.fetchval("SELECT 1")
-    return {"status": "ok", "instance": INSTANCE, "cache": await cache.ping()}
+    await db.primary.fetchval("SELECT 1")
+    return {"status": "ok", "instance": INSTANCE, "cache": await cache.ping(),
+            "replicas": await db.replica_status()}
 
 
 # ВАЖНО: /products/search объявляем РАНЬШЕ /products/{product_id},
@@ -70,7 +68,7 @@ async def search_products(response: Response,
     if (cached := await cache.get(key)) is not None:
         response.headers["X-Cache"] = "HIT"
         return cached
-    rows = await app.state.db.fetch(
+    rows = await db.fetch_ro(
         "SELECT id, name, price FROM products WHERE name ILIKE $1 LIMIT $2",
         f"%{q}%", limit,
     )
@@ -90,7 +88,7 @@ async def list_products(response: Response,
     if (cached := await cache.get(key)) is not None:
         response.headers["X-Cache"] = "HIT"
         return cached
-    rows = await app.state.db.fetch(
+    rows = await db.fetch_ro(
         """SELECT id, name, price, stock FROM products
            WHERE category_id = $1
            ORDER BY price DESC
@@ -112,7 +110,7 @@ async def get_product(product_id: int, response: Response):
         return cached
     # $1 — параметр запроса. Никогда не вставляйте значения в SQL
     # через f-строки — это SQL-инъекция.
-    row = await app.state.db.fetchrow(
+    row = await db.fetchrow_ro(
         """SELECT p.id, p.name, p.description, p.price, p.stock, c.name AS category
            FROM products p JOIN categories c ON c.id = p.category_id
            WHERE p.id = $1""",
@@ -133,7 +131,7 @@ async def top_products(response: Response):
     if (cached := await cache.get(key)) is not None:
         response.headers["X-Cache"] = "HIT"
         return cached
-    rows = await app.state.db.fetch(
+    rows = await db.fetch_ro(
         """SELECT p.id, p.name, t.sold
            FROM (SELECT product_id, sum(quantity) AS sold
                  FROM orders
@@ -158,7 +156,8 @@ async def create_order(order: OrderIn):
     202 Accepted: заказ принят, но ещё не обработан (status = pending).
     Оплату (медленный платёжный шлюз) выполняет consumer.py.
     """
-    async with app.state.db.acquire() as conn:
+    # Запись — только на primary (реплики доступны лишь для чтения)
+    async with db.primary.acquire() as conn:
         async with conn.transaction():
             # FOR UPDATE блокирует строку: два покупателя не купят один товар
             product = await conn.fetchrow(
@@ -193,7 +192,9 @@ async def create_order(order: OrderIn):
 # «Сделайте сами»: заказ по номеру (образец — get_product)
 @app.get("/orders/{order_id}")
 async def get_order(order_id: int):
-    row = await app.state.db.fetchrow(
+    # Заказ читаем с primary: покупатель должен сразу увидеть свой новый заказ,
+    # а реплика могла ещё не получить его (read-your-writes)
+    row = await db.primary.fetchrow(
         """SELECT id, product_id, quantity, total, status, created_at, processed_at
            FROM orders WHERE id = $1""",
         order_id,

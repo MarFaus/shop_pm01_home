@@ -1,0 +1,25 @@
+#!/bin/sh
+# Запуск реплики PostgreSQL.
+# При первом запуске (том пустой) копирует всю базу с primary через pg_basebackup,
+# дальше реплика получает изменения потоком WAL и доступна только на чтение.
+set -e
+
+if [ ! -s "$PGDATA/PG_VERSION" ]; then
+  echo "Реплика пустая — копирую базу с $PRIMARY_HOST..."
+  until pg_isready -h "$PRIMARY_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do
+    sleep 2
+  done
+  mkdir -p "$PGDATA"
+  chown postgres:postgres "$PGDATA"
+  chmod 700 "$PGDATA"
+  # -X stream  — вместе с файлами передать WAL, накопившийся за время копирования
+  # -R         — записать primary_conninfo и standby.signal: «ты реплика, вот твой primary»
+  # --checkpoint=fast — не ждать планового checkpoint на primary
+  su-exec postgres env PGPASSWORD="$REPLICATION_PASSWORD" \
+    pg_basebackup -h "$PRIMARY_HOST" -U replicator -D "$PGDATA" \
+                  -X stream -R --checkpoint=fast
+  echo "Копирование завершено"
+fi
+
+# Запускаем сервер от пользователя postgres с аргументами из command:
+exec su-exec postgres postgres "$@"

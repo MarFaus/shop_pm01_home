@@ -1,0 +1,111 @@
+  █ THRESHOLDS 
+
+    http_req_duration
+    ✓ 'p(95)<500' p(95)=12.72ms
+
+      {name:list}
+      ✓ 'p(95)<10000' p(95)=6.41ms
+
+      {name:order}
+      ✓ 'p(95)<10000' p(95)=24.94ms
+
+      {name:product}
+      ✓ 'p(95)<10000' p(95)=5.36ms
+
+      {name:search}
+      ✓ 'p(95)<10000' p(95)=10.4ms
+
+      {name:top}
+      ✓ 'p(95)<10000' p(95)=4.35ms
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 20171   287.913742/s
+    checks_succeeded...: 100.00% 20171 out of 20171
+    checks_failed......: 0.00%   0 out of 20171
+
+    ✓ ответ получен
+
+    HTTP
+    http_req_duration..............: avg=3.87ms   min=990.56µs med=2.56ms   max=198.82ms p(90)=6.28ms   p(95)=12.72ms 
+      { expected_response:true }...: avg=3.87ms   min=990.56µs med=2.56ms   max=198.82ms p(90)=6.28ms   p(95)=12.72ms 
+      { name:list }................: avg=3.29ms   min=1.24ms   med=2.45ms   max=84.51ms  p(90)=4.16ms   p(95)=6.41ms  
+      { name:order }...............: avg=15.82ms  min=9.54ms   med=14.01ms  max=96.31ms  p(90)=20.79ms  p(95)=24.94ms 
+      { name:product }.............: avg=3ms      min=990.56µs med=2.5ms    max=95.78ms  p(90)=4.41ms   p(95)=5.36ms  
+      { name:search }..............: avg=6.28ms   min=1.49ms   med=5.79ms   max=86.68ms  p(90)=8.64ms   p(95)=10.4ms  
+      { name:top }.................: avg=3.2ms    min=1.03ms   med=2.09ms   max=198.82ms p(90)=3.42ms   p(95)=4.35ms  
+    http_req_failed................: 0.00%  0 out of 20171
+    http_reqs......................: 20171  287.913742/s
+
+    EXECUTION
+    iteration_duration.............: avg=104.58ms min=101.25ms med=103.29ms max=299.71ms p(90)=107.17ms p(95)=113.51ms
+    iterations.....................: 20171  287.913742/s
+    vus............................: 1      min=1          max=49
+    vus_max........................: 50     min=50         max=50
+
+    NETWORK
+    data_received..................: 18 MB  263 kB/s
+    data_sent......................: 1.6 MB 23 kB/s
+
+
+
+
+running (1m10.1s), 00/50 VUs, 20171 complete and 0 interrupted iterations
+default ✓ [ 100% ] 00/50 VUs  1m10s
+
+docker stats во время теста:
+shop-k6-run-65a3f29510ef 23.18% 27.85MiB / 7.704GiB
+shop-lb-1 8.20% 12.19MiB / 64MiB
+shop-consumer-1 2.31% 26.36MiB / 128MiB
+shop-app3-1 20.58% 60.72MiB / 200MiB
+shop-app1-1 21.17% 60.62MiB / 200MiB
+shop-app2-1 19.07% 61.05MiB / 200MiB
+shop-postgres-r2-1 8.27% 149.8MiB / 384MiB
+shop-postgres-r1-1 8.12% 111.7MiB / 384MiB
+shop-redis6-1 0.75% 7.117MiB / 96MiB
+shop-redis2-1 1.80% 7.348MiB / 96MiB
+shop-redis5-1 3.38% 7.551MiB / 96MiB
+shop-postgres-1 4.25% 238.6MiB / 512MiB
+shop-rabbitmq-1 2.89% 134.8MiB / 384MiB
+shop-redis3-1 1.45% 7.742MiB / 96MiB
+shop-redis1-1 6.27% 7.926MiB / 96MiB
+shop-redis4-1 0.69% 6.953MiB / 96MiB
+--
+shop-k6-run-65a3f29510ef 30.42% 29.69MiB / 7.704GiB
+shop-lb-1 17.11% 12.37MiB / 64MiB
+shop-consumer-1 3.14% 26.14MiB / 128MiB
+shop-app3-1 31.95% 60.04MiB / 200MiB
+shop-app1-1 31.17% 60.4MiB / 200MiB
+shop-app2-1 31.55% 61.32MiB / 200MiB
+shop-postgres-r2-1 26.80% 151.5MiB / 384MiB
+shop-postgres-r1-1 13.39% 112.7MiB / 384MiB
+shop-redis6-1 0.84% 6.848MiB / 96MiB
+shop-redis2-1 5.96% 8.074MiB / 96MiB
+shop-redis5-1 4.09% 6.914MiB / 96MiB
+shop-postgres-1 5.88% 240MiB / 512MiB
+shop-rabbitmq-1 4.62% 134.6MiB / 384MiB
+shop-redis3-1 8.97% 7.27MiB / 96MiB
+shop-redis1-1 2.82% 7.652MiB / 96MiB
+shop-redis4-1 3.97% 7.172MiB / 96MiB
+--
+shop-k6-run-65a3f29510ef 29.26% 33.59MiB / 7.704GiB
+shop-lb-1 11.37% 12.61MiB / 64MiB
+shop-consumer-1 2.73% 26.28MiB / 128MiB
+shop-app3-1 28.72% 60.04MiB / 200MiB
+shop-app1-1 31.65% 60.64MiB / 200MiB
+shop-app2-1 27.05% 61.06MiB / 200MiB
+shop-postgres-r2-1 5.77% 152.1MiB / 384MiB
+shop-postgres-r1-1 5.35% 112.3MiB / 384MiB
+shop-redis6-1 0.64% 6.945MiB / 96MiB
+shop-redis2-1 2.21% 7.715MiB / 96MiB
+shop-redis5-1 0.54% 7.051MiB / 96MiB
+shop-postgres-1 5.47% 244.3MiB / 512MiB
+shop-rabbitmq-1 2.69% 134.6MiB / 384MiB
+shop-redis3-1 2.13% 7.445MiB / 96MiB
+shop-redis1-1 1.73% 7.051MiB / 96MiB
+shop-redis4-1 0.71% 7.352MiB / 96MiB
+--
