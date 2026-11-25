@@ -1,0 +1,97 @@
+=== 1. Список категории (GET /products?category_id=7) ===
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Limit (actual time=13.051..17.046 rows=20 loops=1)
+   Buffers: shared hit=4049
+   ->  Gather Merge (actual time=13.050..17.043 rows=20 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         Buffers: shared hit=4049
+         ->  Sort (actual time=8.659..8.665 rows=16 loops=3)
+               Sort Key: price DESC
+               Sort Method: top-N heapsort  Memory: 29kB
+               Buffers: shared hit=4049
+               Worker 0:  Sort Method: top-N heapsort  Memory: 28kB
+               Worker 1:  Sort Method: top-N heapsort  Memory: 30kB
+               ->  Parallel Seq Scan on products (actual time=0.021..8.060 rows=1333 loops=3)
+                     Filter: (category_id = 7)
+                     Rows Removed by Filter: 65333
+                     Buffers: shared hit=3977
+ Planning:
+   Buffers: shared hit=118
+ Planning Time: 0.861 ms
+ Execution Time: 17.150 ms
+(20 rows)
+
+=== 2. Поиск (GET /products/search?q=abc) ===
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Limit (actual time=0.460..8.047 rows=20 loops=1)
+   Buffers: shared hit=84
+   ->  Gather (actual time=0.459..8.041 rows=20 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         Buffers: shared hit=84
+         ->  Parallel Seq Scan on products (actual time=0.106..1.058 rows=7 loops=3)
+               Filter: (name ~~* '%abc%'::text)
+               Rows Removed by Filter: 1404
+               Buffers: shared hit=84
+ Planning Time: 0.212 ms
+ Execution Time: 8.074 ms
+(12 rows)
+
+=== 3. Поиск, которого нет (худший случай: перебрать всё) ===
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Limit (actual time=59.552..63.609 rows=0 loops=1)
+   Buffers: shared hit=3977
+   ->  Gather (actual time=59.551..63.607 rows=0 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         Buffers: shared hit=3977
+         ->  Parallel Seq Scan on products (actual time=54.254..54.255 rows=0 loops=3)
+               Filter: (name ~~* '%zzz%'::text)
+               Rows Removed by Filter: 66667
+               Buffers: shared hit=3977
+ Planning Time: 0.123 ms
+ Execution Time: 63.625 ms
+(12 rows)
+
+=== 4. Топ продаж за неделю (GET /stats/top-products) ===
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
+ Nested Loop (actual time=108.629..109.457 rows=10 loops=1)
+   Buffers: shared hit=548 read=4674
+   ->  Limit (actual time=108.476..109.250 rows=10 loops=1)
+         Buffers: shared hit=508 read=4674
+         ->  Sort (actual time=108.473..109.244 rows=10 loops=1)
+               Sort Key: (sum(orders.quantity)) DESC
+               Sort Method: top-N heapsort  Memory: 25kB
+               Buffers: shared hit=508 read=4674
+               ->  Finalize HashAggregate (actual time=93.058..103.492 rows=36499 loops=1)
+                     Group Key: orders.product_id
+                     Batches: 1  Memory Usage: 3857kB
+                     Buffers: shared hit=505 read=4674
+                     ->  Gather (actual time=65.403..73.666 rows=39210 loops=1)
+                           Workers Planned: 2
+                           Workers Launched: 2
+                           Buffers: shared hit=505 read=4674
+                           ->  Partial HashAggregate (actual time=61.062..64.269 rows=13070 loops=3)
+                                 Group Key: orders.product_id
+                                 Batches: 1  Memory Usage: 1809kB
+                                 Buffers: shared hit=505 read=4674
+                                 Worker 0:  Batches: 1  Memory Usage: 1809kB
+                                 Worker 1:  Batches: 1  Memory Usage: 1553kB
+                                 ->  Parallel Seq Scan on orders (actual time=0.076..52.361 rows=13670 loops=3)
+                                       Filter: (created_at > (now() - '7 days'::interval))
+                                       Rows Removed by Filter: 153654
+                                       Buffers: shared hit=505 read=4674
+   ->  Index Scan using products_pkey on products p (actual time=0.014..0.014 rows=1 loops=10)
+         Index Cond: (id = orders.product_id)
+         Buffers: shared hit=40
+ Planning:
+   Buffers: shared hit=56
+ Planning Time: 1.091 ms
+ Execution Time: 114.570 ms
+(33 rows)
+

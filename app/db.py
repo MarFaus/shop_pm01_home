@@ -18,11 +18,35 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://shop:shop@localhost:5432/
 DATABASE_REPLICA_URLS = [u for u in os.getenv("DATABASE_REPLICA_URLS", "").split(",") if u]
 DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
 REPLICA_RETRY_SEC = 10
+# Чтение с реплики дольше этого — считаем реплику недоступной и идём на primary.
+# Наши запросы с индексами укладываются в десятки миллисекунд.
+REPLICA_TIMEOUT_SEC = float(os.getenv("REPLICA_TIMEOUT_SEC", "1.0"))
 
 # Ошибки «не достучались до сервера» — повод переключиться на primary.
+# (TimeoutError в Python — подкласс OSError, таймаут тоже сюда попадает.)
 # Ошибки в самом SQL (синтаксис и т.п.) не ловим: на primary они повторятся.
 CONNECTION_ERRORS = (OSError, asyncpg.PostgresConnectionError,
                      asyncpg.InterfaceError, asyncpg.CannotConnectNowError)
+
+
+def is_connection_error(exc: Exception) -> bool:
+    if isinstance(exc, CONNECTION_ERRORS):
+        return True
+    # Через PgBouncer недоступный сервер приходит не обрывом сокета, а ошибкой
+    # протокола: SQLSTATE класса 08 (connection exception) с текстом от pgbouncer
+    sqlstate = getattr(exc, "sqlstate", None) or ""
+    return sqlstate.startswith("08") or "pgbouncer" in str(exc).lower()
+
+
+async def _no_reset(conn: asyncpg.Connection) -> None:
+    """Не сбрасывать сессию при возврате соединения в пул.
+
+    По умолчанию asyncpg после КАЖДОГО запроса шлёт RESET ALL,
+    pg_advisory_unlock_all() и CLOSE ALL — лишний сетевой круг.
+    Мы не храним состояние в сессии (SET, блокировки, курсоры),
+    а PgBouncer в режиме transaction и так отдаёт соединение другим.
+    Это видно в pg_stat_statements (db/sql/top_queries.sql).
+    """
 
 
 class Database:
@@ -33,11 +57,13 @@ class Database:
         self._rr = itertools.cycle([0])
 
     async def connect(self) -> None:
-        self.primary = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=DB_POOL_MAX)
+        self.primary = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=DB_POOL_MAX,
+                                                 reset=_no_reset)
         # min_size=0: соединения с репликой открываются при первом запросе,
         # поэтому приложение стартует, даже если реплика ещё не поднялась
         self.replicas = [
-            await asyncpg.create_pool(url, min_size=0, max_size=DB_POOL_MAX, timeout=2)
+            await asyncpg.create_pool(url, min_size=0, max_size=DB_POOL_MAX, timeout=1,
+                                      reset=_no_reset)
             for url in DATABASE_REPLICA_URLS
         ]
         if self.replicas:
@@ -61,8 +87,11 @@ class Database:
         i = self._next_replica()
         if i is not None:
             try:
-                return await getattr(self.replicas[i], method)(query, *args)
-            except CONNECTION_ERRORS as exc:
+                return await getattr(self.replicas[i], method)(query, *args,
+                                                               timeout=REPLICA_TIMEOUT_SEC)
+            except Exception as exc:  # noqa: BLE001
+                if not is_connection_error(exc):
+                    raise
                 log.warning("реплика %d недоступна (%r) — читаю с primary", i, exc)
                 self._down_until[i] = time.monotonic() + REPLICA_RETRY_SEC
         return await getattr(self.primary, method)(query, *args)

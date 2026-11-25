@@ -5,12 +5,13 @@ x-app: &app
   build: ./app
   environment: &app-env
     # ВНИМАНИЕ: хост базы — postgres (имя сервиса), а не localhost
-    DATABASE_URL: postgresql://shop:shop@postgres:5432/shop
+    # Все соединения с БД — через PgBouncer (порт 6432); shop_r1/shop_r2 — реплики
+    DATABASE_URL: postgresql://shop:shop@pgbouncer:6432/shop
     # Адреса для первого подключения; остальную карту кластера клиент узнает сам
     REDIS_CLUSTER_NODES: redis1:6379,redis2:6379,redis3:6379,redis4:6379,redis5:6379,redis6:6379
     RABBITMQ_URL: amqp://shop:shop@rabbitmq:5672/
     # Чтение каталога — с реплик (по очереди)
-    DATABASE_REPLICA_URLS: postgresql://shop:shop@postgres-r1:5432/shop,postgresql://shop:shop@postgres-r2:5432/shop
+    DATABASE_REPLICA_URLS: postgresql://shop:shop@pgbouncer:6432/shop_r1,postgresql://shop:shop@pgbouncer:6432/shop_r2
   depends_on:
     postgres:
       condition: service_healthy   # стартовать, когда база готова
@@ -18,10 +19,10 @@ x-app: &app
       condition: service_completed_successfully   # кластер собран
     rabbitmq:
       condition: service_healthy
-    postgres-r1:
-      condition: service_started   # без реплик приложение работает (читает с primary)
-    postgres-r2:
+    pgbouncer:
       condition: service_started
+    db-migrate:
+      condition: service_completed_successfully   # индексы созданы
   mem_limit: 200m
   cpus: 0.5                        # имитируем слабый сервер — пол-ядра
   restart: on-failure
@@ -30,7 +31,7 @@ x-app: &app
 x-replica: &replica
   image: postgres:16-alpine
   entrypoint: ["sh", "/replica-entrypoint.sh"]
-  command: ["-c", "hot_standby=on"]      # на реплике разрешены SELECT
+  command: ["-c", "config_file=/etc/postgresql/postgresql.conf"]
   environment:
     PRIMARY_HOST: postgres
     POSTGRES_USER: shop
@@ -64,8 +65,8 @@ services:
   # Primary: принимает запись и отдаёт поток WAL репликам
   postgres:
     image: postgres:16-alpine
-    # wal_keep_size — сколько WAL хранить для отставшей реплики
-    command: ["postgres", "-c", "wal_keep_size=256MB"]
+    # Свой файл настроек (лаб 7): память, SSD, репликация, pg_stat_statements
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
     environment:
       POSTGRES_USER: shop
       POSTGRES_PASSWORD: shop
@@ -76,6 +77,8 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data              # данные БД переживут перезапуск
       - ./db/init:/docker-entrypoint-initdb.d:ro     # схема и тестовые данные
+      - ./db/conf/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./db/sql:/sql:ro                             # индексы и диагностика
     shm_size: 256m
     mem_limit: 512m
     healthcheck:
@@ -92,11 +95,46 @@ services:
     volumes:
       - pgdata_r1:/var/lib/postgresql/data
       - ./db/replica-entrypoint.sh:/replica-entrypoint.sh:ro
+      - ./db/conf/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./db/sql:/sql:ro
   postgres-r2:
     <<: *replica
     volumes:
       - pgdata_r2:/var/lib/postgresql/data
       - ./db/replica-entrypoint.sh:/replica-entrypoint.sh:ro
+      - ./db/conf/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./db/sql:/sql:ro
+
+  # Одноразовый контейнер: создаёт индексы (db/sql/indexes.sql) и завершается
+  db-migrate:
+    image: postgres:16-alpine
+    command: ["psql", "-h", "postgres", "-U", "shop", "-d", "shop",
+              "-v", "ON_ERROR_STOP=1", "-f", "/sql/indexes.sql"]
+    environment:
+      PGPASSWORD: shop
+    volumes:
+      - ./db/sql:/sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # Пул соединений перед primary и репликами
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.26.1-p0
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    ports:
+      - "6432:6432"          # консоль: psql -h localhost -p 6432 -U shop pgbouncer
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-r1:
+        condition: service_started
+      postgres-r2:
+        condition: service_started
+    mem_limit: 64m
 
   # Redis Cluster: 6 узлов (3 мастера + 3 реплики). Наружу порты не открываем.
   redis1:
@@ -163,8 +201,10 @@ services:
       - "15672:15672"          # веб-интерфейс
     mem_limit: 384m
     healthcheck:
-      # ping отвечает раньше, чем открыт порт AMQP — проверяем именно порты
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      # Готов, когда открыт порт AMQP. rabbitmq-diagnostics не используем:
+      # он при каждом вызове запускает целую виртуальную машину Erlang
+      # и даёт всплеск CPU до 150% каждые 10 секунд
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5672"]
       interval: 10s
       timeout: 10s
       retries: 12

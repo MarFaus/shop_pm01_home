@@ -1,0 +1,114 @@
+  █ THRESHOLDS 
+
+    http_req_duration
+    ✓ 'p(95)<500' p(95)=12.07ms
+
+      {name:list}
+      ✓ 'p(95)<10000' p(95)=4.93ms
+
+      {name:order}
+      ✓ 'p(95)<10000' p(95)=27.99ms
+
+      {name:product}
+      ✓ 'p(95)<10000' p(95)=5.07ms
+
+      {name:search}
+      ✓ 'p(95)<10000' p(95)=8.87ms
+
+      {name:top}
+      ✓ 'p(95)<10000' p(95)=3.99ms
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 20204   288.586733/s
+    checks_succeeded...: 100.00% 20204 out of 20204
+    checks_failed......: 0.00%   0 out of 20204
+
+    ✓ ответ получен
+
+    HTTP
+    http_req_duration..............: avg=3.71ms   min=1.05ms   med=2.62ms   max=144.69ms p(90)=5.74ms   p(95)=12.07ms
+      { expected_response:true }...: avg=3.71ms   min=1.05ms   med=2.62ms   max=144.69ms p(90)=5.74ms   p(95)=12.07ms
+      { name:list }................: avg=2.84ms   min=1.29ms   med=2.58ms   max=106.16ms p(90)=3.97ms   p(95)=4.93ms 
+      { name:order }...............: avg=17.67ms  min=10.84ms  med=15.55ms  max=144.69ms p(90)=22.82ms  p(95)=27.99ms
+      { name:product }.............: avg=2.89ms   min=1.05ms   med=2.54ms   max=118.33ms p(90)=4.39ms   p(95)=5.07ms 
+      { name:search }..............: avg=5.84ms   min=1.43ms   med=5.77ms   max=19.88ms  p(90)=7.88ms   p(95)=8.87ms 
+      { name:top }.................: avg=2.48ms   min=1.08ms   med=2.23ms   max=38.57ms  p(90)=3.25ms   p(95)=3.99ms 
+    http_req_failed................: 0.00%  0 out of 20204
+    http_reqs......................: 20204  288.586733/s
+
+    EXECUTION
+    iteration_duration.............: avg=104.41ms min=101.21ms med=103.37ms max=244.98ms p(90)=106.45ms p(95)=112.7ms
+    iterations.....................: 20204  288.586733/s
+    vus............................: 1      min=1          max=49
+    vus_max........................: 50     min=50         max=50
+
+    NETWORK
+    data_received..................: 18 MB  261 kB/s
+    data_sent......................: 1.6 MB 23 kB/s
+
+
+
+
+running (1m10.0s), 00/50 VUs, 20204 complete and 0 interrupted iterations
+default ✓ [ 100% ] 00/50 VUs  1m10s
+
+docker stats во время теста:
+shop-k6-run-4cbea2f8d77f 23.20% 26.4MiB / 7.704GiB
+shop-rabbitmq-1 5.22% 132.6MiB / 384MiB
+shop-app2-1 20.90% 59.37MiB / 200MiB
+shop-app1-1 20.98% 59.12MiB / 200MiB
+shop-app3-1 19.31% 59.6MiB / 200MiB
+shop-postgres-r1-1 3.95% 161.1MiB / 384MiB
+shop-postgres-r2-1 3.94% 163.7MiB / 384MiB
+shop-lb-1 8.56% 12.71MiB / 64MiB
+shop-consumer-1 2.19% 26.11MiB / 128MiB
+shop-pgbouncer-1 3.03% 8.562MiB / 64MiB
+shop-postgres-1 4.04% 384.8MiB / 512MiB
+shop-redis4-1 0.57% 6.402MiB / 96MiB
+shop-redis5-1 0.73% 6.242MiB / 96MiB
+shop-redis6-1 3.69% 6.449MiB / 96MiB
+shop-redis1-1 1.83% 7.277MiB / 96MiB
+shop-redis3-1 1.33% 7.574MiB / 96MiB
+shop-redis2-1 1.92% 7.07MiB / 96MiB
+--
+shop-k6-run-4cbea2f8d77f 26.86% 29.96MiB / 7.704GiB
+shop-rabbitmq-1 3.29% 133MiB / 384MiB
+shop-app2-1 23.82% 59.75MiB / 200MiB
+shop-app1-1 25.75% 59.5MiB / 200MiB
+shop-app3-1 23.89% 59.51MiB / 200MiB
+shop-postgres-r1-1 3.63% 161.1MiB / 384MiB
+shop-postgres-r2-1 5.51% 163.7MiB / 384MiB
+shop-lb-1 9.88% 12.79MiB / 64MiB
+shop-consumer-1 2.69% 26.11MiB / 128MiB
+shop-pgbouncer-1 3.31% 8.559MiB / 64MiB
+shop-postgres-1 4.88% 385.4MiB / 512MiB
+shop-redis4-1 0.67% 6.684MiB / 96MiB
+shop-redis5-1 0.60% 6.504MiB / 96MiB
+shop-redis6-1 0.61% 6.492MiB / 96MiB
+shop-redis1-1 1.73% 7.578MiB / 96MiB
+shop-redis3-1 1.72% 7.348MiB / 96MiB
+shop-redis2-1 1.83% 7.34MiB / 96MiB
+--
+shop-k6-run-4cbea2f8d77f 32.64% 32.43MiB / 7.704GiB
+shop-rabbitmq-1 3.78% 133.4MiB / 384MiB
+shop-app2-1 32.34% 59.07MiB / 200MiB
+shop-app1-1 31.08% 59.79MiB / 200MiB
+shop-app3-1 29.92% 59.03MiB / 200MiB
+shop-postgres-r1-1 7.75% 165.7MiB / 384MiB
+shop-postgres-r2-1 13.55% 163.9MiB / 384MiB
+shop-lb-1 12.72% 11.86MiB / 64MiB
+shop-consumer-1 3.18% 26.36MiB / 128MiB
+shop-pgbouncer-1 3.78% 8.324MiB / 64MiB
+shop-postgres-1 4.92% 387.6MiB / 512MiB
+shop-redis4-1 0.99% 6.824MiB / 96MiB
+shop-redis5-1 0.76% 6.871MiB / 96MiB
+shop-redis6-1 0.66% 6.879MiB / 96MiB
+shop-redis1-1 1.98% 7.445MiB / 96MiB
+shop-redis3-1 2.57% 7.43MiB / 96MiB
+shop-redis2-1 2.39% 6.996MiB / 96MiB
+--
