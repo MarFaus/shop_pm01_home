@@ -6,9 +6,12 @@ x-app: &app
   environment: &app-env
     # ВНИМАНИЕ: хост базы — postgres (имя сервиса), а не localhost
     DATABASE_URL: postgresql://shop:shop@postgres:5432/shop
+    REDIS_URL: redis://redis:6379/0
   depends_on:
     postgres:
       condition: service_healthy   # стартовать, когда база готова
+    redis:
+      condition: service_healthy
   mem_limit: 200m
   cpus: 0.5                        # имитируем слабый сервер — пол-ядра
   restart: on-failure
@@ -34,6 +37,21 @@ services:
       timeout: 3s
       retries: 30
       start_period: 30s
+
+  # Кэш. Только в памяти (без сохранения на диск): кэш можно потерять.
+  # maxmemory + allkeys-lru: при нехватке памяти вытесняются давно не читанные ключи.
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"          # для запуска приложения на компьютере и redis-cli
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   # Три одинаковых воркера. Порт наружу не открываем — доступ только через lb.
   app1:

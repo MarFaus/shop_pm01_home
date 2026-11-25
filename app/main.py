@@ -1,12 +1,14 @@
-"""Мини-магазин: FastAPI + PostgreSQL."""
+"""Мини-магазин: FastAPI + PostgreSQL + кэш Redis."""
 import asyncio
 import os
 import socket
 from contextlib import asynccontextmanager
 
 import asyncpg
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
+
+import cache
 
 # --- Настройки из переменных окружения ---
 # По умолчанию — база на этом компьютере (для запуска без Docker)
@@ -21,8 +23,10 @@ INSTANCE = os.getenv("INSTANCE_NAME") or socket.gethostname()
 async def lifespan(app: FastAPI):
     # Выполняется при старте приложения: создаём пул соединений
     app.state.db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=DB_POOL_MAX)
+    await cache.init()
     yield
-    # При остановке — закрываем его
+    # При остановке — закрываем соединения
+    await cache.close()
     await app.state.db.close()
 
 
@@ -50,26 +54,39 @@ async def index():
 @app.get("/health")
 async def health():
     await app.state.db.fetchval("SELECT 1")
-    return {"status": "ok", "instance": INSTANCE}
+    return {"status": "ok", "instance": INSTANCE, "cache": await cache.ping()}
 
 
 # ВАЖНО: /products/search объявляем РАНЬШЕ /products/{product_id},
 # иначе FastAPI сочтёт слово "search" номером товара.
 @app.get("/products/search")
-async def search_products(q: str = Query(min_length=2, max_length=50),
+async def search_products(response: Response,
+                          q: str = Query(min_length=2, max_length=50),
                           limit: int = Query(20, ge=1, le=100)):
+    key = f"search:{q.lower()}:{limit}"
+    if (cached := await cache.get(key)) is not None:
+        response.headers["X-Cache"] = "HIT"
+        return cached
     rows = await app.state.db.fetch(
         "SELECT id, name, price FROM products WHERE name ILIKE $1 LIMIT $2",
         f"%{q}%", limit,
     )
-    return [dict(r) for r in rows]
+    result = [dict(r) for r in rows]
+    await cache.set(key, result, ttl=60)
+    response.headers["X-Cache"] = "MISS"
+    return result
 
 
 @app.get("/products")
-async def list_products(category_id: int = Query(1, ge=1),
+async def list_products(response: Response,
+                        category_id: int = Query(1, ge=1),
                         limit: int = Query(20, ge=1, le=100),
                         offset: int = Query(0, ge=0, le=10000)):
     """Товары категории, сначала самые дорогие."""
+    key = f"list:{category_id}:{limit}:{offset}"
+    if (cached := await cache.get(key)) is not None:
+        response.headers["X-Cache"] = "HIT"
+        return cached
     rows = await app.state.db.fetch(
         """SELECT id, name, price, stock FROM products
            WHERE category_id = $1
@@ -77,11 +94,19 @@ async def list_products(category_id: int = Query(1, ge=1),
            LIMIT $2 OFFSET $3""",
         category_id, limit, offset,
     )
-    return [dict(r) for r in rows]
+    result = [dict(r) for r in rows]
+    # Остатки в списке могут отставать на 30 секунд — для каталога это допустимо
+    await cache.set(key, result, ttl=30)
+    response.headers["X-Cache"] = "MISS"
+    return result
 
 
 @app.get("/products/{product_id}")
-async def get_product(product_id: int):
+async def get_product(product_id: int, response: Response):
+    key = f"product:{product_id}"
+    if (cached := await cache.get(key)) is not None:
+        response.headers["X-Cache"] = "HIT"
+        return cached
     # $1 — параметр запроса. Никогда не вставляйте значения в SQL
     # через f-строки — это SQL-инъекция.
     row = await app.state.db.fetchrow(
@@ -92,12 +117,19 @@ async def get_product(product_id: int):
     )
     if row is None:
         raise HTTPException(404, "Товар не найден")
-    return dict(row)
+    result = dict(row)
+    await cache.set(key, result, ttl=60)
+    response.headers["X-Cache"] = "MISS"
+    return result
 
 
 @app.get("/stats/top-products")
-async def top_products():
+async def top_products(response: Response):
     """Топ-10 продаваемых товаров за неделю — «тяжёлый» запрос."""
+    key = "stats:top"
+    if (cached := await cache.get(key)) is not None:
+        response.headers["X-Cache"] = "HIT"
+        return cached
     rows = await app.state.db.fetch(
         """SELECT p.id, p.name, t.sold
            FROM (SELECT product_id, sum(quantity) AS sold
@@ -109,7 +141,11 @@ async def top_products():
            JOIN products p ON p.id = t.product_id
            ORDER BY t.sold DESC"""
     )
-    return [dict(r) for r in rows]
+    result = [dict(r) for r in rows]
+    # Статистика за неделю: отставание на 30 секунд никто не заметит
+    await cache.set(key, result, ttl=30)
+    response.headers["X-Cache"] = "MISS"
+    return result
 
 
 @app.post("/orders", status_code=201)
@@ -136,6 +172,8 @@ async def create_order(order: OrderIn):
                    RETURNING id, product_id, quantity, total, status, created_at""",
                 order.product_id, order.quantity, product["price"] * order.quantity,
             )
+    # Инвалидация: остаток товара изменился — старая карточка в кэше неверна
+    await cache.delete(f"product:{order.product_id}")
     return dict(row)
 
 
