@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Мини-магазин — витрина</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232948d6'/%3E%3Cpath d='M4 6h8l-1 6H5z' fill='white'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+/* Витрина «Мини-магазина». Статическая страница: отдаёт edge (nginx),
+   данные берёт из того же API, что и нагрузочный тест. Внизу — журнал
+   запросов: какой воркер ответил, был ли HIT в Redis и в edge-кэше. */
+:root {
+  --bg: #e9edf1;
+  --surface: #ffffff;
+  --ink: #18202b;
+  --muted: #5b6676;
+  --line: #cbd3dc;
+  --accent: #2948d6;
+  --accent-ink: #ffffff;
+  --ok: #17804f;
+  --wait: #a66d06;
+  --err: #b3261e;
+  --tape: #f6f8fa;
+  --sans: "Onest", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12161c;
+    --surface: #1b2129;
+    --ink: #e6eaef;
+    --muted: #97a2b1;
+    --line: #313a46;
+    --accent: #7d95ff;
+    --accent-ink: #0d1220;
+    --ok: #4cc38a;
+    --wait: #e0a83a;
+    --err: #ff7b72;
+    --tape: #161b22;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 16px/1.5 var(--sans);
+  padding-bottom: 260px;          /* место под журнал запросов */
+}
+button, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- Шапка ---------- */
+.top {
+  display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.brand { font-weight: 700; font-size: 22px; letter-spacing: -0.01em; margin: 0; }
+.brand small { display: block; font-weight: 400; font-size: 13px; color: var(--muted); letter-spacing: 0; }
+.search { display: flex; flex: 1 1 320px; max-width: 560px; }
+.search input {
+  flex: 1; min-width: 0; padding: 10px 14px;
+  border: 1px solid var(--line); border-right: 0; border-radius: 8px 0 0 8px;
+  background: var(--bg);
+}
+.search button {
+  padding: 10px 18px; border: 0; border-radius: 0 8px 8px 0;
+  background: var(--accent); color: var(--accent-ink); font-weight: 500; cursor: pointer;
+}
+
+/* ---------- Три колонки ---------- */
+.layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr) 360px;
+  gap: 24px; padding: 24px; max-width: 1440px; margin: 0 auto;
+  align-items: start;
+}
+.rail h2, .list h2, .detail h2 { font-size: 15px; font-weight: 500; color: var(--muted); margin: 0 0 12px; }
+.cats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+.cats button {
+  aspect-ratio: 1; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); cursor: pointer; font-size: 14px; font-variant-numeric: tabular-nums;
+}
+.cats button:hover { border-color: var(--accent); }
+.cats button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.rail p { font-size: 13px; color: var(--muted); margin: 12px 0 0; }
+
+/* ---------- Список товаров ---------- */
+.list h1 { font-size: 30px; line-height: 1.15; margin: 0 0 4px; letter-spacing: -0.015em; }
+.list .sub { color: var(--muted); margin: 0 0 18px; }
+.rows { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.rows li + li { border-top: 1px solid var(--line); }
+.row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 16px;
+  width: 100%; padding: 12px 16px; border: 0; background: none; text-align: left; cursor: pointer;
+}
+.row:hover { background: var(--bg); }
+.row[aria-current="true"] { box-shadow: inset 3px 0 0 var(--accent); background: var(--bg); }
+.row .name { font-weight: 500; }
+.row .art { grid-column: 1; font: 12px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .price { grid-row: 1; grid-column: 2; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
+.row .meta { grid-column: 2; font-size: 13px; color: var(--muted); text-align: right; }
+.more { margin-top: 12px; padding: 10px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); cursor: pointer; }
+.empty { padding: 24px 16px; color: var(--muted); }
+
+/* ---------- Карточка и заказ ---------- */
+.detail { position: sticky; top: 16px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+.card .cat { font-size: 13px; color: var(--muted); margin: 0; }
+.card h3 { font-size: 22px; line-height: 1.2; margin: 4px 0 2px; }
+.card .art { font: 12px var(--mono); color: var(--muted); word-break: break-all; margin: 0 0 12px; }
+.card .desc { margin: 0 0 16px; }
+.card .price { font-size: 32px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 0; line-height: 1.1; }
+.card .stock { color: var(--muted); margin: 4px 0 16px; }
+.buy { display: flex; gap: 8px; }
+.buy input { width: 76px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); text-align: center; }
+.buy button { flex: 1; padding: 10px 16px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font-weight: 500; cursor: pointer; }
+.buy button:disabled { opacity: .55; cursor: progress; }
+.hint { font-size: 13px; color: var(--muted); margin: 12px 0 0; }
+.placeholder { color: var(--muted); }
+
+.order { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.order h4 { margin: 0 0 10px; font-size: 16px; }
+.steps { list-style: none; margin: 0; padding: 0; }
+.steps li { position: relative; padding: 0 0 14px 26px; color: var(--muted); }
+.steps li::before {
+  content: ""; position: absolute; left: 4px; top: 6px; width: 10px; height: 10px; border-radius: 50%;
+  border: 2px solid var(--line); background: var(--surface);
+}
+.steps li:not(:last-child)::after { content: ""; position: absolute; left: 9px; top: 20px; bottom: 2px; width: 2px; background: var(--line); }
+.steps li.done { color: var(--ink); }
+.steps li.done::before { background: var(--ok); border-color: var(--ok); }
+.steps li.now::before { border-color: var(--wait); background: var(--wait); animation: pulse 1s ease-in-out infinite; }
+.steps small { display: block; font-size: 13px; color: var(--muted); }
+.error { color: var(--err); margin: 12px 0 0; }
+@keyframes pulse { 50% { opacity: .35; } }
+
+/* ---------- Журнал запросов (лента внизу) ---------- */
+.log {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
+  background: var(--tape); border-top: 2px solid var(--ink);
+  font: 13px/1.5 var(--mono);
+}
+.log header { display: flex; align-items: center; gap: 16px; padding: 8px 24px; border-bottom: 1px dashed var(--line); font-family: var(--sans); }
+.log header strong { font-size: 14px; }
+.log header span { color: var(--muted); font-size: 13px; }
+.log header button { margin-left: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 4px 10px; cursor: pointer; font-size: 13px; }
+.log .scroll { max-height: 200px; overflow-y: auto; }
+.log table { width: 100%; border-collapse: collapse; }
+.log th { position: sticky; top: 0; background: var(--tape); text-align: left; font-weight: 600; color: var(--muted); padding: 4px 12px; }
+.log td { padding: 3px 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.log td.path { max-width: 40vw; overflow: hidden; text-overflow: ellipsis; }
+.log td.ms { text-align: right; }
+.log tr.fresh { animation: flash 1.2s ease-out; }
+.log.collapsed .scroll { display: none; }
+body.log-collapsed { padding-bottom: 60px; }
+.tag { display: inline-block; min-width: 44px; padding: 0 6px; border-radius: 4px; font-weight: 600; text-align: center; }
+.tag.hit { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.tag.miss { background: color-mix(in srgb, var(--wait) 18%, transparent); color: var(--wait); }
+.tag.none { color: var(--muted); }
+.code-ok { color: var(--ok); }
+.code-bad { color: var(--err); }
+@keyframes flash { from { background: color-mix(in srgb, var(--accent) 22%, transparent); } }
+
+@media (max-width: 1100px) {
+  .layout { grid-template-columns: 200px minmax(0, 1fr); }
+  .detail { grid-column: 1 / -1; position: static; }
+}
+@media (max-width: 700px) {
+  .top { padding: 14px 16px; gap: 12px; }
+  .layout { grid-template-columns: minmax(0, 1fr); padding: 16px; gap: 20px; }
+  .cats { grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 3px; }
+  .cats button { font-size: 13px; padding: 0; }
+  .list h1 { font-size: 24px; }
+  .log header { padding: 8px 16px; }
+  .log header span { display: none; }
+  .log .col-edge, .log .col-time, .log .ms { display: none; }
+  .log td, .log th { padding: 3px 6px; }
+  .log td.path { max-width: 46vw; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .steps li.now::before, .log tr.fresh { animation: none; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <p class="brand">Мини-магазин<small>200 000 товаров, 50 категорий</small></p>
+  <form class="search" id="search" role="search">
+    <input id="q" name="q" aria-label="Поиск товаров" type="search" minlength="2" maxlength="50" placeholder="Поиск по названию или артикулу, например 7e77" autocomplete="off">
+    <button type="submit">Найти</button>
+  </form>
+</header>
+
+<main class="layout">
+  <nav class="rail" aria-labelledby="cats-title">
+    <h2 id="cats-title">Категории</h2>
+    <div class="cats" id="cats"></div>
+    <p>В категории ~4 000 товаров, сначала самые дорогие.</p>
+  </nav>
+
+  <section class="list" aria-live="polite">
+    <h1 id="list-title">Хиты недели</h1>
+    <p class="sub" id="list-sub">Десять товаров, которые чаще всего покупали за последние 7 дней.</p>
+    <ul class="rows" id="rows"><li class="empty">Загружаю…</li></ul>
+    <button class="more" id="more" hidden>Показать ещё 20</button>
+  </section>
+
+  <aside class="detail" id="detail" aria-live="polite">
+    <h2>Товар</h2>
+    <div class="card"><p class="placeholder">Выберите товар в списке — здесь появятся описание, остаток и кнопка покупки.</p></div>
+  </aside>
+</main>
+
+<section class="log" id="log" aria-label="Журнал запросов">
+  <header>
+    <strong>Журнал запросов</strong>
+    <span>кто ответил на каждый запрос страницы: edge-кэш, воркер, Redis</span>
+    <button type="button" id="log-toggle" aria-expanded="true">Свернуть</button>
+  </header>
+  <div class="scroll">
+    <table>
+      <thead><tr>
+        <th class="col-time">время</th><th>запрос</th><th>код</th>
+        <th class="col-edge">edge</th><th>воркер</th><th>Redis</th><th class="ms">мс</th>
+      </tr></thead>
+      <tbody id="log-rows"></tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const rub = new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB" });
+const PAGE = 20;
+
+// Название из БД: «Товар 166 7e7757b1…» → имя и артикул
+function splitName(name) {
+  const m = /^(.*?\d+)\s+([0-9a-f]{32})$/.exec(name);
+  return m ? { title: m[1], art: m[2] } : { title: name, art: "" };
+}
+
+// ---------- Запросы к API с записью в журнал ----------
+async function api(path, options = {}) {
+  const started = performance.now();
+  let res;
+  try {
+    res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+  } catch (e) {
+    logRow(options.method || "GET", path, "сеть", null, performance.now() - started);
+    throw new Error("Сервер не отвечает. Проверьте, что стенд запущен: docker compose ps");
+  }
+  logRow(options.method || "GET", path, res.status, res.headers, performance.now() - started);
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const detail = body && typeof body.detail === "string" ? body.detail : `код ответа ${res.status}`;
+    const err = new Error(detail); err.status = res.status; throw err;
+  }
+  return body;
+}
+
+function tag(value) {
+  if (!value) return '<span class="tag none">—</span>';
+  const cls = value === "HIT" ? "hit" : value === "MISS" || value === "EXPIRED" ? "miss" : "none";
+  return `<span class="tag ${cls}">${esc(value)}</span>`;
+}
+
+function logRow(method, path, status, headers, ms) {
+  const edge = headers && headers.get("X-Cache-Status");
+  // Ответ из edge-кэша до приложения не дошёл: заголовки воркера в нём — от старого ответа
+  const fromEdge = edge === "HIT" || edge === "STALE" || edge === "UPDATING";
+  const worker = !headers || fromEdge ? "—" : headers.get("X-Instance") || "—";
+  const redis = !headers || fromEdge ? null : headers.get("X-Cache");
+  const ok = typeof status === "number" && status < 400;
+  const tr = document.createElement("tr");
+  tr.className = "fresh";
+  tr.innerHTML =
+    `<td class="col-time">${new Date().toLocaleTimeString("ru-RU")}</td>` +
+    `<td class="path">${esc(method)} ${esc(decodeURIComponent(path))}</td>` +
+    `<td class="${ok ? "code-ok" : "code-bad"}">${esc(status)}</td>` +
+    `<td class="col-edge">${tag(edge)}</td>` +
+    `<td>${esc(worker)}</td>` +
+    `<td>${tag(redis)}</td>` +
+    `<td class="ms">${ms.toFixed(1)}</td>`;
+  const body = $("log-rows");
+  body.prepend(tr);
+  while (body.children.length > 60) body.lastChild.remove();
+}
+
+$("log-toggle").addEventListener("click", () => {
+  const collapsed = $("log").classList.toggle("collapsed");
+  document.body.classList.toggle("log-collapsed", collapsed);
+  $("log-toggle").textContent = collapsed ? "Развернуть" : "Свернуть";
+  $("log-toggle").setAttribute("aria-expanded", String(!collapsed));
+});
+
+// ---------- Список товаров ----------
+const state = { mode: "top", category: null, offset: 0, query: "", selected: null };
+
+function rowHtml(p) {
+  const { title, art } = splitName(p.name);
+  const meta = p.sold != null ? `продано ${p.sold} шт.` : p.stock != null ? `в наличии ${p.stock}` : "";
+  const price = p.price != null ? rub.format(p.price) : "";
+  return `<li><button class="row" data-id="${p.id}" aria-current="${p.id === state.selected}">
+    <span class="name">${esc(title)}</span><span class="price">${price}</span>
+    <span class="art">арт. ${esc(art)}</span><span class="meta">${esc(meta)}</span></button></li>`;
+}
+
+function render(items, append) {
+  const rows = $("rows");
+  if (!append) rows.innerHTML = "";
+  if (!items.length && !append) {
+    rows.innerHTML = `<li class="empty">${state.mode === "search"
+      ? "Ничего не нашлось. Попробуйте 2–3 символа из артикула, например «abc» или «7e7»."
+      : "В этой категории нет товаров."}</li>`;
+  }
+  rows.insertAdjacentHTML("beforeend", items.map(rowHtml).join(""));
+}
+
+async function showTop() {
+  Object.assign(state, { mode: "top", category: null });
+  markCategory(null);
+  $("list-title").textContent = "Хиты недели";
+  $("list-sub").textContent = "Десять товаров, которые чаще всего покупали за последние 7 дней.";
+  $("more").hidden = true;
+  await load(() => api("/stats/top-products"));
+  // У хитов в ответе нет цены — подтягиваем карточки (они почти всегда в кэше)
+  // и показываем вместе с ценой
+  const ids = [...document.querySelectorAll(".row")].map((b) => b.dataset.id);
+  const cards = await Promise.all(ids.map((id) => api(`/products/${id}`).catch(() => null)));
+  document.querySelectorAll(".row").forEach((b, i) => {
+    if (cards[i]) b.querySelector(".price").textContent = rub.format(cards[i].price);
+  });
+}
+
+async function showCategory(id, append = false) {
+  if (!append) Object.assign(state, { mode: "cat", category: id, offset: 0 });
+  markCategory(id);
+  $("list-title").textContent = `Категория ${id}`;
+  $("list-sub").textContent = "Сначала самые дорогие. Остатки в списке обновляются раз в 30 секунд.";
+  const items = await load(() => api(`/products?category_id=${id}&limit=${PAGE}&offset=${state.offset}`), append);
+  $("more").hidden = items.length < PAGE || state.offset + PAGE > 10000;
+}
+
+async function showSearch(q) {
+  Object.assign(state, { mode: "search", query: q, category: null });
+  markCategory(null);
+  $("list-title").textContent = `Поиск: «${q}»`;
+  $("list-sub").textContent = "Первые 20 совпадений в названии или артикуле.";
+  $("more").hidden = true;
+  await load(() => api(`/products/search?q=${encodeURIComponent(q)}&limit=${PAGE}`));
+}
+
+async function load(request, append = false) {
+  try {
+    const items = await request();
+    render(items, append);
+    return items;
+  } catch (e) {
+    $("rows").innerHTML = `<li class="empty error">${esc(e.message)}</li>`;
+    return [];
+  }
+}
+
+function markCategory(id) {
+  document.querySelectorAll(".cats button").forEach((b) =>
+    b.setAttribute("aria-pressed", String(Number(b.dataset.cat) === id)));
+}
+
+$("cats").innerHTML = Array.from({ length: 50 }, (_, i) =>
+  `<button type="button" data-cat="${i + 1}" aria-pressed="false" aria-label="Категория ${i + 1}">${i + 1}</button>`).join("");
+$("cats").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-cat]");
+  if (b) showCategory(Number(b.dataset.cat));
+});
+$("more").addEventListener("click", () => {
+  state.offset += PAGE;
+  showCategory(state.category, true);
+});
+$("search").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const q = $("q").value.trim();
+  if (q.length >= 2) showSearch(q);
+  else if (!q) showTop();
+});
+$("rows").addEventListener("click", (e) => {
+  const b = e.target.closest(".row");
+  if (!b) return;
+  document.querySelectorAll(".row").forEach((r) => r.setAttribute("aria-current", String(r === b)));
+  showProduct(Number(b.dataset.id));
+});
+
+// ---------- Карточка товара и заказ ----------
+async function showProduct(id, keepOrder = false) {
+  state.selected = id;
+  const detail = $("detail");
+  const orderBlock = keepOrder ? detail.querySelector(".order") : null;
+  let p;
+  try {
+    p = await api(`/products/${id}`);
+  } catch (e) {
+    detail.querySelector(".card").innerHTML = `<p class="error">${esc(e.message)}</p>`;
+    return;
+  }
+  if (state.selected !== id) return;   // пока грузили, выбрали другой товар
+  const { title, art } = splitName(p.name);
+  detail.querySelector(".card").innerHTML = `
+    <p class="cat">${esc(p.category)}</p>
+    <h3>${esc(title)}</h3>
+    <p class="art">арт. ${esc(art)}</p>
+    <p class="desc">${esc(p.description || "")}</p>
+    <p class="price">${rub.format(p.price)}</p>
+    <p class="stock">В наличии: ${p.stock} шт.</p>
+    <form class="buy" id="buy">
+      <input id="qty" aria-label="Количество" type="number" min="1" max="100" value="1" required>
+      <button type="submit">Купить</button>
+    </form>
+    <p class="hint">Цена и остаток на витрине обновляются раз в 10 секунд — так работает edge-кэш.</p>`;
+  if (orderBlock) detail.querySelector(".card").append(orderBlock);
+  $("buy").addEventListener("submit", (e) => { e.preventDefault(); buy(p); });
+  if (!keepOrder && window.matchMedia("(max-width: 1100px)").matches) {
+    detail.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+function orderHtml(o, error) {
+  if (error) return `<div class="order"><h4>Заказ не оформлен</h4><p class="error">${esc(error)}</p></div>`;
+  const paid = o.status === "processed";
+  const took = paid ? Math.round(new Date(o.processed_at) - new Date(o.created_at)) : null;
+  return `<div class="order">
+    <h4>Заказ №${o.id} · ${rub.format(o.total)}</h4>
+    <ol class="steps">
+      <li class="done">Принят, товар зарезервирован<small>API ответило 202 и поставило заказ в очередь RabbitMQ</small></li>
+      <li class="${paid ? "done" : "now"}">${paid ? "Оплачен" : "Ждёт оплаты"}<small>${paid
+        ? `consumer провёл оплату через ${took} мс после приёма`
+        : "consumer забирает заказ из очереди и обращается к платёжному шлюзу"}</small></li>
+    </ol></div>`;
+}
+
+async function buy(p) {
+  const btn = document.querySelector("#buy button");
+  const card = $("detail").querySelector(".card");
+  const quantity = Number($("qty").value);
+  btn.disabled = true;
+  btn.textContent = "Оформляю…";
+  card.querySelector(".order")?.remove();
+  let order;
+  try {
+    order = await api("/orders", { method: "POST", body: JSON.stringify({ product_id: p.id, quantity }) });
+  } catch (e) {
+    const msg = e.status === 409 ? "На складе меньше товара, чем вы заказали. Уменьшите количество." : e.message;
+    card.insertAdjacentHTML("beforeend", orderHtml(null, msg));
+    btn.disabled = false; btn.textContent = "Купить";
+    return;
+  }
+  card.insertAdjacentHTML("beforeend", orderHtml(order));
+  btn.disabled = false; btn.textContent = "Купить ещё";
+  // Опрашиваем статус, пока consumer не обработает заказ (обычно ~0,2 с)
+  for (let i = 0; i < 40 && order.status !== "processed"; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    try { order = await api(`/orders/${order.id}`); } catch { break; }
+    if (state.selected !== p.id) return;
+    card.querySelector(".order").outerHTML = orderHtml(order);
+  }
+}
+
+// На телефоне журнал по умолчанию свёрнут, чтобы не закрывать витрину
+if (window.matchMedia("(max-width: 700px)").matches) $("log-toggle").click();
+
+showTop();
+</script>
+</body>
+</html>
