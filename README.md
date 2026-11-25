@@ -90,4 +90,4 @@ docker compose run --rm k6 run /scripts/stress.js   # 300 пользовател
 
 - [ЖУРНАЛ.md](ЖУРНАЛ.md) — журнал замеров по всем лабам, опыты с отказами, EXPLAIN до и после индексов
 - [ОТВЕТЫ.md](ОТВЕТЫ.md) — ответы на контрольные вопросы
-- `results/` — полные отчёты k6, `docker stats`, планы запросов
+- `results/` — полные отчёты k6, `docker stats`, планы запросов, скриншот Grafana (`lab8_grafana.jpg`)
