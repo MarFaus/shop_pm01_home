@@ -12,12 +12,17 @@ if [ ! -s "$PGDATA/PG_VERSION" ]; then
   mkdir -p "$PGDATA"
   chown postgres:postgres "$PGDATA"
   chmod 700 "$PGDATA"
+  # Слот репликации: primary хранит WAL, пока реплика его не получит, даже если
+  # она долго лежала. Слот от прошлой жизни (том реплики пересоздали) удаляем.
+  PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$PRIMARY_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+    "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = '$SLOT_NAME'"
   # -X stream  — вместе с файлами передать WAL, накопившийся за время копирования
-  # -R         — записать primary_conninfo и standby.signal: «ты реплика, вот твой primary»
+  # -R         — записать primary_conninfo, имя слота и standby.signal: «ты реплика»
+  # -C -S      — создать слот и сразу им пользоваться
   # --checkpoint=fast — не ждать планового checkpoint на primary
   su-exec postgres env PGPASSWORD="$REPLICATION_PASSWORD" \
     pg_basebackup -h "$PRIMARY_HOST" -U replicator -D "$PGDATA" \
-                  -X stream -R --checkpoint=fast
+                  -X stream -R -C -S "$SLOT_NAME" --checkpoint=fast
   echo "Копирование завершено"
 fi
 

@@ -1,6 +1,7 @@
-fastapi
-uvicorn
-asyncpg
-redis
-aio-pika
-prometheus-client
+# Версии закреплены: сборка с нуля даёт ровно то, что проверено
+fastapi==0.165.0
+uvicorn==0.54.0
+asyncpg==0.32.0
+redis==8.2.0
+aio-pika==10.2.3
+prometheus-client==0.26.0

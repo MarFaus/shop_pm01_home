@@ -39,7 +39,7 @@
       "gridPos": {
         "x": 0,
         "y": 1,
-        "w": 6,
+        "w": 5,
         "h": 4
       },
       "targets": [
@@ -95,9 +95,9 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 6,
+        "x": 5,
         "y": 1,
-        "w": 6,
+        "w": 5,
         "h": 4
       },
       "targets": [
@@ -153,9 +153,9 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 12,
+        "x": 10,
         "y": 1,
-        "w": 6,
+        "w": 5,
         "h": 4
       },
       "targets": [
@@ -211,9 +211,9 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 18,
+        "x": 15,
         "y": 1,
-        "w": 6,
+        "w": 5,
         "h": 4
       },
       "targets": [
@@ -256,6 +256,73 @@
         },
         "colorMode": "value",
         "graphMode": "area",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Живые воркеры",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Сколько из 3 воркеров отвечает Prometheus. Если 0 — ошибки 5xx отдаёт уже nginx, и панель «Ошибки 5xx» их не видит",
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(up{job=\"app\"})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "min": 0,
+          "max": 3,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
         "textMode": "auto"
       }
     },
@@ -556,7 +623,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rabbitmq_queue_messages_ready)",
+          "expr": "sum(rabbitmq_queue_messages_ready{queue=\"orders\"})",
           "legendFormat": "ждут в очереди"
         },
         {

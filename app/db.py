@@ -107,7 +107,8 @@ class Database:
         status = []
         for pool in self.replicas:
             try:
-                status.append(await pool.fetchval("SELECT pg_is_in_recovery()"))
+                status.append(await pool.fetchval("SELECT pg_is_in_recovery()",
+                                                  timeout=REPLICA_TIMEOUT_SEC))
             except Exception:  # noqa: BLE001
                 status.append(False)
         return status

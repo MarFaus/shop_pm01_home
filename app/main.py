@@ -139,7 +139,11 @@ async def get_product(product_id: int, response: Response):
         return cached
     # $1 — параметр запроса. Никогда не вставляйте значения в SQL
     # через f-строки — это SQL-инъекция.
-    row = await db.fetchrow_ro(
+    # Карточку при промахе читаем с PRIMARY, а не с реплики. Иначе гонка:
+    # заказ уменьшил stock и удалил ключ, следующий запрос прочитал с реплики
+    # старый остаток (WAL ещё не дошёл) и положил его в кэш на 60 секунд.
+    # Промахов мало (горячие товары в кэше), primary это почти не нагружает.
+    row = await db.primary.fetchrow(
         """SELECT p.id, p.name, p.description, p.price, p.stock, c.name AS category
            FROM products p JOIN categories c ON c.id = p.category_id
            WHERE p.id = $1""",

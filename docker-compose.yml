@@ -32,9 +32,10 @@ x-replica: &replica
   image: postgres:16-alpine
   entrypoint: ["sh", "/replica-entrypoint.sh"]
   command: ["-c", "config_file=/etc/postgresql/postgresql.conf"]
-  environment:
+  environment: &replica-env
     PRIMARY_HOST: postgres
     POSTGRES_USER: shop
+    POSTGRES_PASSWORD: shop        # чтобы удалить старый слот на primary
     POSTGRES_DB: shop
     REPLICATION_PASSWORD: replicator
   depends_on:
@@ -42,6 +43,7 @@ x-replica: &replica
       condition: service_healthy
   shm_size: 256m
   mem_limit: 384m
+  restart: unless-stopped
   healthcheck:
     test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U shop -d shop"]
     interval: 5s
@@ -81,7 +83,8 @@ services:
       POSTGRES_DB: shop
       REPLICATION_PASSWORD: replicator    # для db/init/02_replication.sh
     ports:
-      - "5432:5432"          # чтобы приложение на компьютере могло подключиться
+      # для подключения с компьютера; 127.0.0.1 — только с этого компьютера, не из сети
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data              # данные БД переживут перезапуск
       - ./db/init:/docker-entrypoint-initdb.d:ro     # схема и тестовые данные
@@ -89,6 +92,7 @@ services:
       - ./db/sql:/sql:ro                             # индексы и диагностика
     shm_size: 256m
     mem_limit: 512m
+    restart: unless-stopped
     healthcheck:
       # база готова, когда отвечает по TCP (после загрузки данных)
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U shop -d shop"]
@@ -100,6 +104,7 @@ services:
   # Реплики: копия primary только для чтения
   postgres-r1:
     <<: *replica
+    environment: { <<: *replica-env, SLOT_NAME: replica1 }
     volumes:
       - pgdata_r1:/var/lib/postgresql/data
       - ./db/replica-entrypoint.sh:/replica-entrypoint.sh:ro
@@ -107,6 +112,7 @@ services:
       - ./db/sql:/sql:ro
   postgres-r2:
     <<: *replica
+    environment: { <<: *replica-env, SLOT_NAME: replica2 }
     volumes:
       - pgdata_r2:/var/lib/postgresql/data
       - ./db/replica-entrypoint.sh:/replica-entrypoint.sh:ro
@@ -134,7 +140,7 @@ services:
       - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
     ports:
-      - "6432:6432"          # консоль: psql -h localhost -p 6432 -U shop pgbouncer
+      - "127.0.0.1:6432:6432"   # консоль: psql -h localhost -p 6432 -U shop pgbouncer
     depends_on:
       postgres:
         condition: service_healthy
@@ -206,7 +212,7 @@ services:
       - rabbitdata:/var/lib/rabbitmq                       # очереди переживут перезапуск
       - ./rabbitmq/limits.conf:/etc/rabbitmq/conf.d/20-limits.conf:ro
     ports:
-      - "15672:15672"          # веб-интерфейс
+      - "127.0.0.1:15672:15672"   # веб-интерфейс
     mem_limit: 384m
     healthcheck:
       # Готов, когда открыт порт AMQP. rabbitmq-diagnostics не используем:
@@ -255,7 +261,7 @@ services:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - promdata:/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     mem_limit: 256m
 
   grafana:
@@ -271,7 +277,7 @@ services:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on: [prometheus]
     mem_limit: 256m
 
@@ -300,7 +306,7 @@ services:
       DATA_SOURCE_NAME: postgresql://shop:shop@postgres-r2:5432/shop?sslmode=disable
 
   k6:
-    image: grafana/k6:latest
+    image: grafana/k6:2.4.0
     profiles: ["test"]
     environment:
       BASE_URL: http://edge   # тест идёт так же, как пользователи: через edge-кэш
